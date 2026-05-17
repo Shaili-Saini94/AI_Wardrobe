@@ -1,0 +1,62 @@
+CREATE TABLE ClothingItem (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    imageUri TEXT NOT NULL,
+    category TEXT NOT NULL,
+    tags TEXT,
+    dateAdded INTEGER NOT NULL
+);
+
+CREATE TABLE Outfit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    dateCreated INTEGER NOT NULL
+);
+
+CREATE TABLE OutfitItem (
+    outfitId INTEGER NOT NULL,
+    clothingItemId INTEGER NOT NULL,
+    PRIMARY KEY (outfitId, clothingItemId),
+    FOREIGN KEY (outfitId) REFERENCES Outfit(id) ON DELETE CASCADE,
+    FOREIGN KEY (clothingItemId) REFERENCES ClothingItem(id) ON DELETE CASCADE
+);
+
+-- Queries for ClothingItem
+insertClothingItem:
+INSERT INTO ClothingItem (imageUri, category, tags, dateAdded)
+VALUES (?, ?, ?, ?);
+
+selectAllClothingItems:
+SELECT * FROM ClothingItem;
+
+selectClothingItemById:
+SELECT * FROM ClothingItem WHERE id = ?;
+
+deleteClothingItem:
+DELETE FROM ClothingItem WHERE id = ?;
+
+updateClothingItem:
+UPDATE ClothingItem SET category = ?, tags = ? WHERE id = ?;
+
+-- Queries for Outfit
+insertOutfit:
+INSERT INTO Outfit (name, dateCreated)
+VALUES (?, ?);
+
+lastInsertedOutfitId:
+SELECT last_insert_rowid();
+
+selectAllOutfits:
+SELECT * FROM Outfit;
+
+deleteOutfit:
+DELETE FROM Outfit WHERE id = ?;
+
+-- Queries for OutfitItem
+insertOutfitItem:
+INSERT INTO OutfitItem (outfitId, clothingItemId)
+VALUES (?, ?);
+
+selectItemsForOutfit:
+SELECT ci.* FROM ClothingItem ci
+JOIN OutfitItem oi ON ci.id = oi.clothingItemId
+WHERE oi.outfitId = ?;
