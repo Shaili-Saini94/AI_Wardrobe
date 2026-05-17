@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 rootProject.name = "AIWardrobe"
 include(":composeApp")
 include(":fashionai-sdk")
+include(":app")

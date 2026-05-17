@@ -22,11 +22,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.ai.wardrobe.domain.model.ClothingItem
 import com.ai.wardrobe.util.FileUtil
 import androidx.core.content.FileProvider
-import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,6 +34,10 @@ fun WardrobeGalleryScreen(
     modifier: Modifier = Modifier
 ) {
     val items by viewModel.clothingItems.collectAsState()
+    val isProcessing by viewModel.isProcessing.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+    
     val context = LocalContext.current
     var showAddOptions by remember { mutableStateOf(false) }
     var capturedImageUri by remember { mutableStateOf<Uri?>(null) }
@@ -53,12 +56,20 @@ fun WardrobeGalleryScreen(
         }
     }
 
+    LaunchedEffect(errorMessage) {
+        errorMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearError()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Digital Closet", fontWeight = FontWeight.Bold) }
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(onClick = { showAddOptions = true }) {
                 Icon(Icons.Rounded.Add, contentDescription = "Add Item")
@@ -66,25 +77,41 @@ fun WardrobeGalleryScreen(
         },
         modifier = modifier
     ) { padding ->
-        if (items.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Your closet is empty. Add some clothes!", style = MaterialTheme.typography.bodyLarge)
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (items.isEmpty() && !isProcessing) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Your closet is empty. Add some clothes!", style = MaterialTheme.typography.bodyLarge)
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 160.dp),
+                    contentPadding = PaddingValues(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(items, key = { it.id ?: 0L }) { item ->
+                        ClothingItemCard(item = item)
+                    }
+                }
             }
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 160.dp),
-                contentPadding = PaddingValues(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.padding(padding)
-            ) {
-                items(items, key = { it.id ?: 0L }) { item ->
-                    ClothingItemCard(item = item)
+
+            if (isProcessing) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("Analyzing your clothing...")
+                    }
                 }
             }
         }
