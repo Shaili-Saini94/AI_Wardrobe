@@ -91,6 +91,7 @@ dependencies {
     implementation(libs.sqldelight.android.driver)
     implementation(libs.sqldelight.coroutines.extensions)
     implementation(libs.mlkit.image.labeling)
+    implementation(libs.play.services.mlkit.subject.segmentation)
     implementation(libs.litertcore)
     implementation(libs.litertsupport)
     implementation(libs.coil3.compose)

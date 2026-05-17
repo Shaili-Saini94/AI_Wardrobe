@@ -23,6 +23,10 @@ internal object FashionLabelDictionary {
         "dress_shirt" to "Shirt",
         "shirt" to "Shirt",
         "button_down" to "Shirt",
+        "neck" to "Shirt",
+        "apparel" to "Clothing",
+        "clothing" to "Clothing",
+        "garment" to "Clothing",
         "hoodie" to "Hoodie",
         "sweatshirt" to "Sweatshirt",
         "windbreaker" to "Jacket",
@@ -87,7 +91,8 @@ internal object FashionLabelDictionary {
     private val TOPS_LABELS = setOf(
         "jersey", "t_shirt", "tshirt", "polo_shirt", "polo", "dress_shirt", "shirt",
         "button_down", "hoodie", "sweatshirt", "windbreaker", "jacket", "blazer",
-        "cardigan", "crop_top", "tank_top", "sleeveless", "full_sleeve_top", "long_sleeve"
+        "cardigan", "crop_top", "tank_top", "sleeveless", "full_sleeve_top", "long_sleeve",
+        "neck", "apparel", "clothing", "garment"
     )
 
     private val BOTTOMS_LABELS = setOf(
