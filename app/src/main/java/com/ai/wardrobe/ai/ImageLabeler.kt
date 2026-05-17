@@ -15,7 +15,13 @@ import javax.inject.Singleton
 data class ImageAnalysisResult(
     val isClothing: Boolean,
     val category: String,
-    val tags: List<String>
+    val tags: List<String>,
+    val occasions: List<String> = emptyList(),
+    val seasons: List<String> = emptyList(),
+    val styleTypes: List<String> = emptyList(),
+    val mood: String? = null,
+    val weather: String? = null,
+    val debugReason: String? = null
 )
 
 @Singleton
@@ -26,7 +32,7 @@ class ImageLabeler @Inject constructor(
     private val fashionAI = FashionAI.Builder(context)
         .setMode(FashionAIMode.ON_DEVICE)
         .setModelFileName("ai.tflite")
-        .setConfidenceThreshold(0.05f) // Ultra-sensitive for detection phase
+        .setConfidenceThreshold(0.01f) // Ultra-low to catch any possible garment
         .build()
 
     init {
@@ -35,21 +41,17 @@ class ImageLabeler @Inject constructor(
 
     suspend fun analyzeImage(imageUri: Uri): ImageAnalysisResult {
         return try {
-            val originalBitmap = loadBitmap(imageUri) ?: return errorResult()
-            Log.d("ImageLabeler", "Analyzing image: ${originalBitmap.width}x${originalBitmap.height}")
+            val originalBitmap = loadBitmap(imageUri) ?: return errorResult("Load failed")
 
-            // 1. Multi-pass detection (Full image, 80% center, 60% center)
+            // Multi-pass detection (Full image, 80% center, 60% center)
             val fullDetection = fashionAI.detectClothing(originalBitmap)
             val crop80 = smartCrop(originalBitmap, 0.8)
             val detection80 = fashionAI.detectClothing(crop80)
             val crop60 = smartCrop(originalBitmap, 0.6)
             val detection60 = fashionAI.detectClothing(crop60)
 
-            // 2. Pick the best detection signal
+            // Pick the best signal
             val allDetections = listOf(fullDetection, detection80, detection60)
-            
-            // Logic: Prefer results that identified a clothing type over UNKNOWN, 
-            // then prefer higher confidence.
             var bestDetection = fullDetection
             for (det in allDetections) {
                 val currentIsKnown = det.clothingType != ClothingType.UNKNOWN
@@ -62,23 +64,16 @@ class ImageLabeler @Inject constructor(
                 }
             }
 
-            Log.d("ImageLabeler", "Best detection: ${bestDetection.subTypeDisplay} (Conf: ${bestDetection.confidence})")
+            // Logic to accept
+            val isKnownType = bestDetection.clothingType != ClothingType.UNKNOWN
+            val hasKnownAlt = bestDetection.alternatives.any { it.clothingType != ClothingType.UNKNOWN }
+            val isClothing = isKnownType || hasKnownAlt || bestDetection.confidence > 0.4f
 
-            // 3. Robust verification: Is it clothing?
-            // We accept if:
-            // - ClothingType is known
-            // - OR any alternative is a known clothing type
-            // - OR it's a generic high-confidence "garment/fabric" signal
-            val hasClothingSignal = bestDetection.clothingType != ClothingType.UNKNOWN || 
-                                   bestDetection.alternatives.any { it.clothingType != ClothingType.UNKNOWN } ||
-                                   bestDetection.confidence > 0.4f
-
-            if (!hasClothingSignal) {
-                Log.w("ImageLabeler", "No clothing signal found. Top label: ${bestDetection.subTypeRaw}")
-                return errorResult()
+            if (!isClothing) {
+                return errorResult("No clothing signal")
             }
 
-            // 4. Categorize using the best source bitmap
+            // Categorize using the best source bitmap
             val sourceForCategorization = when (bestDetection) {
                 detection80 -> crop80
                 detection60 -> crop60
@@ -87,24 +82,33 @@ class ImageLabeler @Inject constructor(
             
             val categoryResult = fashionAI.categorize(bestDetection, sourceForCategorization)
             
-            // 5. Final Category Name Logic
             val displayCategory = when {
                 bestDetection.clothingType != ClothingType.UNKNOWN -> categoryResult.subType
-                bestDetection.alternatives.any { it.clothingType != ClothingType.UNKNOWN } -> {
-                    bestDetection.alternatives.first { it.clothingType != ClothingType.UNKNOWN }.label
-                }
-                else -> "Garment"
+                hasKnownAlt -> bestDetection.alternatives.first { it.clothingType != ClothingType.UNKNOWN }.label
+                else -> bestDetection.subTypeRaw
             }
 
             ImageAnalysisResult(
                 isClothing = true,
-                category = displayCategory.replace("_", " ").capitalize(),
-                tags = categoryResult.tags
+                category = formatCategoryName(displayCategory),
+                tags = categoryResult.tags,
+                occasions = categoryResult.occasions.map { it.name },
+                seasons = categoryResult.seasons.map { it.name },
+                styleTypes = categoryResult.styleTypes.map { it.name },
+                mood = "Relaxed", // Default mood inference
+                weather = categoryResult.seasons.firstOrNull()?.name ?: "Sunny"
             )
         } catch (e: Exception) {
-            Log.e("ImageLabeler", "Error analyzing image", e)
-            errorResult()
+            Log.e("ImageLabeler", "Error", e)
+            errorResult("System error")
         }
+    }
+
+    private fun formatCategoryName(name: String): String {
+        return name.lowercase()
+            .replace("_", " ")
+            .split(" ")
+            .joinToString(" ") { it.replaceFirstChar { char -> char.uppercase() } }
     }
 
     private fun smartCrop(source: Bitmap, factor: Double): Bitmap {
@@ -122,15 +126,14 @@ class ImageLabeler @Inject constructor(
             context.contentResolver.openInputStream(uri)?.use { 
                 BitmapFactory.decodeStream(it)
             }
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
-    private fun errorResult() = ImageAnalysisResult(
+    private fun errorResult(reason: String) = ImageAnalysisResult(
         isClothing = false,
         category = "Unknown",
-        tags = emptyList()
+        tags = emptyList(),
+        debugReason = reason
     )
     
     private fun String.capitalize() = this.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }

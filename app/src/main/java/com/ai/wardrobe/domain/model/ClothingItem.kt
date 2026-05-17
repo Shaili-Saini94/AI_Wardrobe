@@ -5,5 +5,10 @@ data class ClothingItem(
     val imageUri: String,
     val category: String,
     val tags: List<String>,
+    val occasions: List<String> = emptyList(),
+    val seasons: List<String> = emptyList(),
+    val styleTypes: List<String> = emptyList(),
+    val mood: String? = null,
+    val weather: String? = null,
     val dateAdded: Long
 )

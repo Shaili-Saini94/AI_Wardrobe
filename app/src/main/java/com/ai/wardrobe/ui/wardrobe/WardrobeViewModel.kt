@@ -49,11 +49,16 @@ class WardrobeViewModel @Inject constructor(
                         imageUri = savedUri,
                         category = result.category,
                         tags = result.tags,
+                        occasions = result.occasions,
+                        seasons = result.seasons,
+                        styleTypes = result.styleTypes,
+                        mood = result.mood,
+                        weather = result.weather,
                         dateAdded = System.currentTimeMillis()
                     )
                     repository.insertClothingItem(newItem)
                 } else {
-                    _errorMessage.value = "This item doesn't look like clothing. Please try again."
+                    _errorMessage.value = result.debugReason ?: "This item doesn't look like clothing. Please try again."
                 }
             } catch (e: Exception) {
                 _errorMessage.value = "Failed to analyze image: ${e.message}"

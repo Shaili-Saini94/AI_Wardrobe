@@ -10,7 +10,12 @@ fun ClothingItemEntity.toClothingItem(): ClothingItem {
         id = id,
         imageUri = imageUri,
         category = category,
-        tags = tags?.split(",") ?: emptyList(),
+        tags = tags?.split(",")?.filter { it.isNotBlank() } ?: emptyList(),
+        occasions = occasions?.split(",")?.filter { it.isNotBlank() } ?: emptyList(),
+        seasons = seasons?.split(",")?.filter { it.isNotBlank() } ?: emptyList(),
+        styleTypes = styleTypes?.split(",")?.filter { it.isNotBlank() } ?: emptyList(),
+        mood = mood,
+        weather = weather,
         dateAdded = dateAdded
     )
 }

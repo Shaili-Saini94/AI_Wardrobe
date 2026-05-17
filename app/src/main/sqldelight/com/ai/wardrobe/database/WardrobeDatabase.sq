@@ -3,6 +3,11 @@ CREATE TABLE ClothingItem (
     imageUri TEXT NOT NULL,
     category TEXT NOT NULL,
     tags TEXT,
+    occasions TEXT,
+    seasons TEXT,
+    styleTypes TEXT,
+    mood TEXT,
+    weather TEXT,
     dateAdded INTEGER NOT NULL
 );
 
@@ -22,8 +27,8 @@ CREATE TABLE OutfitItem (
 
 -- Queries for ClothingItem
 insertClothingItem:
-INSERT INTO ClothingItem (imageUri, category, tags, dateAdded)
-VALUES (?, ?, ?, ?);
+INSERT INTO ClothingItem (imageUri, category, tags, occasions, seasons, styleTypes, mood, weather, dateAdded)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 selectAllClothingItems:
 SELECT * FROM ClothingItem;

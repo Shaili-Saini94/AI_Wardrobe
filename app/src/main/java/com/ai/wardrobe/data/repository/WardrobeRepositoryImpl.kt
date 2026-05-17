@@ -40,6 +40,11 @@ class WardrobeRepositoryImpl(
                 imageUri = item.imageUri,
                 category = item.category,
                 tags = item.tags.joinToString(","),
+                occasions = item.occasions.joinToString(","),
+                seasons = item.seasons.joinToString(","),
+                styleTypes = item.styleTypes.joinToString(","),
+                mood = item.mood,
+                weather = item.weather,
                 dateAdded = item.dateAdded
             )
         }
