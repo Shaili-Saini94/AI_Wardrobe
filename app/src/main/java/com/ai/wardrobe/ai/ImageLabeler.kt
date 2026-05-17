@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.Log
 import com.fashionai.sdk.FashionAI
 import com.fashionai.sdk.model.ClothingType
 import com.fashionai.sdk.model.FashionAIMode
@@ -25,7 +26,7 @@ class ImageLabeler @Inject constructor(
     private val fashionAI = FashionAI.Builder(context)
         .setMode(FashionAIMode.ON_DEVICE)
         .setModelFileName("ai.tflite")
-        .setConfidenceThreshold(0.15f) // Very low threshold to capture any signal
+        .setConfidenceThreshold(0.05f) // Ultra-sensitive for detection phase
         .build()
 
     init {
@@ -34,38 +35,86 @@ class ImageLabeler @Inject constructor(
 
     suspend fun analyzeImage(imageUri: Uri): ImageAnalysisResult {
         return try {
-            val bitmap = loadBitmap(imageUri) ?: return errorResult()
+            val originalBitmap = loadBitmap(imageUri) ?: return errorResult()
+            Log.d("ImageLabeler", "Analyzing image: ${originalBitmap.width}x${originalBitmap.height}")
 
-            // Detect clothing
-            val detection = fashionAI.detectClothing(bitmap)
+            // 1. Multi-pass detection (Full image, 80% center, 60% center)
+            val fullDetection = fashionAI.detectClothing(originalBitmap)
+            val crop80 = smartCrop(originalBitmap, 0.8)
+            val detection80 = fashionAI.detectClothing(crop80)
+            val crop60 = smartCrop(originalBitmap, 0.6)
+            val detection60 = fashionAI.detectClothing(crop60)
+
+            // 2. Pick the best detection signal
+            val allDetections = listOf(fullDetection, detection80, detection60)
             
-            // Smart detection: Check if the top result OR any of the alternatives are clothing
-            val isClothing = detection.clothingType != ClothingType.UNKNOWN || 
-                           detection.alternatives.any { it.clothingType != ClothingType.UNKNOWN } ||
-                           detection.confidence > 0.5f
+            // Logic: Prefer results that identified a clothing type over UNKNOWN, 
+            // then prefer higher confidence.
+            var bestDetection = fullDetection
+            for (det in allDetections) {
+                val currentIsKnown = det.clothingType != ClothingType.UNKNOWN
+                val bestIsKnown = bestDetection.clothingType != ClothingType.UNKNOWN
+                
+                if (currentIsKnown && !bestIsKnown) {
+                    bestDetection = det
+                } else if (currentIsKnown == bestIsKnown && det.confidence > bestDetection.confidence) {
+                    bestDetection = det
+                }
+            }
 
-            if (!isClothing) {
+            Log.d("ImageLabeler", "Best detection: ${bestDetection.subTypeDisplay} (Conf: ${bestDetection.confidence})")
+
+            // 3. Robust verification: Is it clothing?
+            // We accept if:
+            // - ClothingType is known
+            // - OR any alternative is a known clothing type
+            // - OR it's a generic high-confidence "garment/fabric" signal
+            val hasClothingSignal = bestDetection.clothingType != ClothingType.UNKNOWN || 
+                                   bestDetection.alternatives.any { it.clothingType != ClothingType.UNKNOWN } ||
+                                   bestDetection.confidence > 0.4f
+
+            if (!hasClothingSignal) {
+                Log.w("ImageLabeler", "No clothing signal found. Top label: ${bestDetection.subTypeRaw}")
                 return errorResult()
             }
 
-            // Categorize
-            val categoryResult = fashionAI.categorize(detection, bitmap)
+            // 4. Categorize using the best source bitmap
+            val sourceForCategorization = when (bestDetection) {
+                detection80 -> crop80
+                detection60 -> crop60
+                else -> originalBitmap
+            }
             
-            // If the primary detection was UNKNOWN but we found an alternative, use the best alternative
-            val finalCategory = if (detection.clothingType == ClothingType.UNKNOWN) {
-                detection.alternatives.firstOrNull { it.clothingType != ClothingType.UNKNOWN }?.label ?: categoryResult.subType
-            } else {
-                categoryResult.subType
+            val categoryResult = fashionAI.categorize(bestDetection, sourceForCategorization)
+            
+            // 5. Final Category Name Logic
+            val displayCategory = when {
+                bestDetection.clothingType != ClothingType.UNKNOWN -> categoryResult.subType
+                bestDetection.alternatives.any { it.clothingType != ClothingType.UNKNOWN } -> {
+                    bestDetection.alternatives.first { it.clothingType != ClothingType.UNKNOWN }.label
+                }
+                else -> "Garment"
             }
 
             ImageAnalysisResult(
                 isClothing = true,
-                category = finalCategory.replace("_", " ").capitalize(),
+                category = displayCategory.replace("_", " ").capitalize(),
                 tags = categoryResult.tags
             )
         } catch (e: Exception) {
+            Log.e("ImageLabeler", "Error analyzing image", e)
             errorResult()
         }
+    }
+
+    private fun smartCrop(source: Bitmap, factor: Double): Bitmap {
+        val width = source.width
+        val height = source.height
+        val newWidth = (width * factor).toInt()
+        val newHeight = (height * factor).toInt()
+        val startX = (width - newWidth) / 2
+        val startY = (height - newHeight) / 2
+        return Bitmap.createBitmap(source, startX, startY, newWidth, newHeight)
     }
 
     private fun loadBitmap(uri: Uri): Bitmap? {

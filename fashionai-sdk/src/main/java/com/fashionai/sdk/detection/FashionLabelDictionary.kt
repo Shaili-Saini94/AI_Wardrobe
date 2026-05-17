@@ -27,6 +27,11 @@ internal object FashionLabelDictionary {
         "apparel" to "Clothing",
         "clothing" to "Clothing",
         "garment" to "Clothing",
+        "checked" to "Shirt",
+        "plaid" to "Shirt",
+        "patterned" to "Shirt",
+        "top" to "Shirt",
+        "fabric" to "Clothing",
         "hoodie" to "Hoodie",
         "sweatshirt" to "Sweatshirt",
         "windbreaker" to "Jacket",
@@ -38,6 +43,11 @@ internal object FashionLabelDictionary {
         "sleeveless" to "Sleeveless Top",
         "full_sleeve_top" to "Full Sleeve Top",
         "long_sleeve" to "Full Sleeve Top",
+        "blouse" to "Blouse",
+        "tunic" to "Blouse",
+        "ruffle" to "Blouse",
+        "frill" to "Blouse",
+        "v_neck" to "Shirt",
 
         // Bottoms
         "denim" to "Jeans",
@@ -92,7 +102,8 @@ internal object FashionLabelDictionary {
         "jersey", "t_shirt", "tshirt", "polo_shirt", "polo", "dress_shirt", "shirt",
         "button_down", "hoodie", "sweatshirt", "windbreaker", "jacket", "blazer",
         "cardigan", "crop_top", "tank_top", "sleeveless", "full_sleeve_top", "long_sleeve",
-        "neck", "apparel", "clothing", "garment"
+        "neck", "apparel", "clothing", "garment", "checked", "plaid", "patterned", "top", "fabric",
+        "blouse", "tunic", "ruffle", "frill", "v_neck"
     )
 
     private val BOTTOMS_LABELS = setOf(
