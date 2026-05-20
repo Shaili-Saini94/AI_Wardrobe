@@ -1,0 +1,131 @@
+CREATE TABLE ClothingItem (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    imageUri TEXT NOT NULL,
+    thumbnailUri TEXT,
+    thumbnailBackUri TEXT,
+    category TEXT NOT NULL,
+    tags TEXT,
+    occasions TEXT,
+    seasons TEXT,
+    styleTypes TEXT,
+    mood TEXT,
+    weather TEXT,
+    dominantColor TEXT,
+    dateAdded INTEGER NOT NULL
+);
+
+CREATE TABLE Outfit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    styleType TEXT,
+    occasionType TEXT,
+    styleNote TEXT,
+    weatherNote TEXT,
+    colorStory TEXT,
+    whyItWorks TEXT,
+    dateCreated INTEGER NOT NULL
+);
+
+CREATE TABLE OutfitItem (
+    outfitId INTEGER NOT NULL,
+    clothingItemId INTEGER NOT NULL,
+    PRIMARY KEY (outfitId, clothingItemId),
+    FOREIGN KEY (outfitId) REFERENCES Outfit(id) ON DELETE CASCADE,
+    FOREIGN KEY (clothingItemId) REFERENCES ClothingItem(id) ON DELETE CASCADE
+);
+
+CREATE TABLE WornHistory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clothingItemId INTEGER NOT NULL,
+    wornAt INTEGER NOT NULL,
+    FOREIGN KEY (clothingItemId) REFERENCES ClothingItem(id) ON DELETE CASCADE
+);
+
+CREATE TABLE OutfitCalendar (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    outfitId INTEGER,
+    plannedDate TEXT NOT NULL,
+    note TEXT,
+    FOREIGN KEY (outfitId) REFERENCES Outfit(id) ON DELETE SET NULL
+);
+
+-- ClothingItem queries
+insertClothingItem:
+INSERT INTO ClothingItem (imageUri, thumbnailUri, thumbnailBackUri, category, tags, occasions, seasons, styleTypes, mood, weather, dominantColor, dateAdded)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectAllClothingItems:
+SELECT * FROM ClothingItem ORDER BY dateAdded DESC;
+
+selectClothingItemById:
+SELECT * FROM ClothingItem WHERE id = ?;
+
+deleteClothingItem:
+DELETE FROM ClothingItem WHERE id = ?;
+
+updateClothingItem:
+UPDATE ClothingItem
+SET category = ?, tags = ?, occasions = ?, seasons = ?, styleTypes = ?, dominantColor = ?
+WHERE id = ?;
+
+updateThumbnailUri:
+UPDATE ClothingItem SET thumbnailUri = ? WHERE id = ?;
+
+updateThumbnailBackUri:
+UPDATE ClothingItem SET thumbnailBackUri = ? WHERE id = ?;
+
+lastInsertedItemId:
+SELECT last_insert_rowid();
+
+-- Outfit queries
+insertOutfit:
+INSERT INTO Outfit (name, styleType, occasionType, styleNote, weatherNote, colorStory, whyItWorks, dateCreated)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+lastInsertedOutfitId:
+SELECT last_insert_rowid();
+
+selectAllOutfits:
+SELECT * FROM Outfit ORDER BY dateCreated DESC;
+
+deleteOutfit:
+DELETE FROM Outfit WHERE id = ?;
+
+-- OutfitItem queries
+insertOutfitItem:
+INSERT INTO OutfitItem (outfitId, clothingItemId)
+VALUES (?, ?);
+
+selectItemsForOutfit:
+SELECT ci.* FROM ClothingItem ci
+JOIN OutfitItem oi ON ci.id = oi.clothingItemId
+WHERE oi.outfitId = ?;
+
+-- WornHistory queries
+insertWornRecord:
+INSERT INTO WornHistory (clothingItemId, wornAt) VALUES (?, ?);
+
+selectWornHistoryForItem:
+SELECT * FROM WornHistory WHERE clothingItemId = ? ORDER BY wornAt DESC;
+
+selectLastWornForItem:
+SELECT wornAt FROM WornHistory WHERE clothingItemId = ? ORDER BY wornAt DESC LIMIT 1;
+
+selectItemsNotWornSince:
+SELECT DISTINCT ci.* FROM ClothingItem ci
+LEFT JOIN WornHistory wh ON ci.id = wh.clothingItemId
+WHERE wh.wornAt IS NULL OR wh.wornAt < ?
+ORDER BY ci.dateAdded DESC;
+
+-- OutfitCalendar queries
+insertCalendarEntry:
+INSERT INTO OutfitCalendar (outfitId, plannedDate, note) VALUES (?, ?, ?);
+
+selectAllCalendarEntries:
+SELECT * FROM OutfitCalendar ORDER BY plannedDate ASC;
+
+selectCalendarEntriesForDate:
+SELECT * FROM OutfitCalendar WHERE plannedDate = ?;
+
+deleteCalendarEntry:
+DELETE FROM OutfitCalendar WHERE id = ?;

@@ -1,0 +1,37 @@
+# Build artifacts
+**/build/
+.gradle/
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+/.idea/deploymentTargetSelector.xml
+/.idea/appInsightsSettings.xml
+
+# Kotlin
+.kotlin/
+**/kotlin-js-store/
+
+# OS specific
+.DS_Store
+*.swp
+*.out
+
+# Android specific
+*.iml
+*.apk
+*.ap_
+*.dex
+*.class
+/captures
+.externalNativeBuild
+.cxx
+
+# Local configuration
+local.properties
+
+# Secrets
+.aiexclude

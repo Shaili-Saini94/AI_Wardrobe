@@ -1,0 +1,14 @@
+Dress
+Hat
+Jacket
+Jeans
+Kurta
+Lehenga
+Pants
+Sandals
+Saree
+Shirt
+Shoes
+Shorts
+Sweater
+T-Shirt
