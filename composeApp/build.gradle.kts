@@ -46,7 +46,6 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.coil3.compose)
             implementation(libs.coil3.network.okhttp)
-            implementation(project(":fashionai-sdk"))
         }
     }
 }

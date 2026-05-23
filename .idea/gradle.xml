@@ -11,7 +11,12 @@
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/app" />
             <option value="$PROJECT_DIR$/composeApp" />
-            <option value="$PROJECT_DIR$/fashionai-sdk" />
+            <option value="$PROJECT_DIR$/wardrobekit" />
+            <option value="$PROJECT_DIR$/wardrobekit/core" />
+            <option value="$PROJECT_DIR$/wardrobekit/recommendation" />
+            <option value="$PROJECT_DIR$/wardrobekit/sample" />
+            <option value="$PROJECT_DIR$/wardrobekit/storage" />
+            <option value="$PROJECT_DIR$/wardrobekit/vision" />
           </set>
         </option>
       </GradleProjectSettings>

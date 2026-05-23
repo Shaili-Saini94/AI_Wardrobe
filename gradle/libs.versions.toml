@@ -34,6 +34,7 @@ mediapipe = "0.10.14"
 # LiteRT (formerly TensorFlow Lite)
 litert = "1.4.2"
 litertSupport = "1.4.2"
+room = "2.7.0-alpha01"
 kotlinxCoroutinesPlayServices = "1.10.2"
 core = "1.6.1"
 runner = "1.6.2"
@@ -85,6 +86,9 @@ hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-com
 sqldelight-coroutines-extensions = { group = "app.cash.sqldelight", name = "coroutines-extensions", version.ref = "sqldelight" }
 mlkit-image-labeling = { group = "com.google.mlkit", name = "image-labeling", version.ref = "mlkitImageLabeling" }
 play-services-mlkit-subject-segmentation = { group = "com.google.android.gms", name = "play-services-mlkit-subject-segmentation", version.ref = "mlkitSubjectSegmentation" }
+room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 litertcore = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 litertsupport = { group = "com.google.ai.edge.litert", name = "litert-support", version.ref = "litertSupport" }
 litertgpu = { group = "com.google.ai.edge.litert", name = "litert-gpu", version.ref = "litert" }
