@@ -22,6 +22,7 @@ android {
 
 dependencies {
     api(project(":wardrobekit:core"))
+    implementation(libs.androidx.exifinterface)
     // TFLite (optional — provided by consumer app)
     compileOnly(libs.litertcore)
     compileOnly(libs.litertsupport)

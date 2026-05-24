@@ -6,10 +6,13 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import android.util.Log
-import com.fashionai.sdk.FashionAI
-import com.fashionai.sdk.model.ClothingType
-import com.fashionai.sdk.model.FashionAIMode
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.label.ImageLabeling
+import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -30,173 +33,330 @@ class ImageLabeler @Inject constructor(
     @param:ApplicationContext private val context: Context
 ) {
 
-    private val fashionAI = FashionAI.Builder(context)
-        .setMode(FashionAIMode.ON_DEVICE)
-        .setModelFileName("ai.tflite")
-        .setConfidenceThreshold(0.01f)
-        .build()
-
-    private var isPrepared = false
-
-    init {
-        try {
-            isPrepared = fashionAI.prepare()
-            Log.d("ImageLabeler", "FashionAI Initialized: $isPrepared")
-        } catch (e: Exception) {
-            Log.e("ImageLabeler", "Initialization failed", e)
-        }
-    }
+    private val labeler = ImageLabeling.getClient(
+        ImageLabelerOptions.Builder()
+            .setConfidenceThreshold(0.35f)
+            .build()
+    )
 
     suspend fun analyzeImage(imageUri: Uri): ImageAnalysisResult {
-        // Ensure prepared
-        if (!isPrepared) {
-            isPrepared = fashionAI.prepare()
-            Log.d("ImageLabeler", "Late Preparation Result: $isPrepared")
-        }
-
         return try {
-            val rawBitmap = loadBitmap(imageUri) ?: return errorResult("Load failed")
-            
-            // Normalize bitmap: Standard size and ARGB_8888 for MediaPipe
-            val originalBitmap = normalizeBitmap(rawBitmap)
-            Log.d("ImageLabeler", "Normalized Image: ${originalBitmap.width}x${originalBitmap.height}")
+            val rawBitmap = loadBitmap(imageUri)
+                ?: return errorResult("Image load failed. Please try another image.")
 
-            // Multi-pass detection
-            val passes = listOf(
+            val originalBitmap = normalizeBitmap(rawBitmap)
+
+            val bitmapsToAnalyze = listOf(
                 originalBitmap,
-                smartCrop(originalBitmap, 0.8),
-                smartCrop(originalBitmap, 0.6)
+                smartCrop(originalBitmap, 0.85),
+                smartCrop(originalBitmap, 0.65)
             )
 
-            val detections = passes.map { fashionAI.detectClothing(it) }
+            val candidates = mutableListOf<LabelCandidate>()
 
-            // Find best signal
-            var bestDetection = detections[0]
-            var foundKnownType = false
+            bitmapsToAnalyze.forEachIndexed { index, bitmap ->
+                val labels = analyzeBitmap(bitmap)
 
-            for (det in detections) {
-                Log.d("ImageLabeler", "Pass Result: ${det.subTypeRaw} (Conf: ${det.confidence})")
-                
-                if (det.clothingType != ClothingType.UNKNOWN) {
-                    if (!foundKnownType || det.confidence > bestDetection.confidence) {
-                        bestDetection = det
-                        foundKnownType = true
-                    }
-                }
-                
-                val altClothing = det.alternatives.firstOrNull { it.clothingType != ClothingType.UNKNOWN }
-                if (altClothing != null) {
-                    if (!foundKnownType || altClothing.confidence > bestDetection.confidence) {
-                        bestDetection = det.copy(
-                            clothingType = altClothing.clothingType,
-                            subTypeRaw = altClothing.label,
-                            confidence = altClothing.confidence
-                        )
-                        foundKnownType = true
-                    }
+                labels.forEach { candidate ->
+                    candidates += candidate.copy(passIndex = index)
                 }
             }
 
-            // RECOVERY LOGIC: If model returned 0.0 confidence, it might be a model failure or threshold issue
-            if (!foundKnownType && bestDetection.confidence == 0f) {
-                // If it's a clear photo (high resolution), we assume the AI is failing to parse the metadata.
-                // In a production Wardrobe app, we should allow saving it as a generic item.
-                Log.w("ImageLabeler", "AI engine returned 0 results. Check if ai.tflite is valid.")
-                
-                // Final attempt: check if there's ANYTHING in the primary detections
-                val highestConfAny = detections.maxByOrNull { it.confidence } ?: bestDetection
-                if (highestConfAny.confidence > 0f) {
-                    bestDetection = highestConfAny
-                }
+            if (candidates.isEmpty()) {
+                return errorResult("No label detected. Try a clearer clothing photo.")
             }
 
-            // Acceptance criteria
-            val keywords = setOf("shirt", "top", "blouse", "ruffle", "fabric", "textile", "garment", "apparel", "neck", "blue", "navy")
-            val isGarmentByLabel = keywords.any { bestDetection.subTypeRaw.lowercase().contains(it) }
-            
-            // If AI is completely blind (0.0), but we are in the closet tab, 
-            // we will "trust" that it's a garment but label it as unknown
-            val isClothing = foundKnownType || isGarmentByLabel || bestDetection.confidence > 0.25f || 
-                            (bestDetection.subTypeRaw == "unknown" && originalBitmap.width > 200)
+            val sortedCandidates = candidates.sortedByDescending { it.confidence }
 
-            if (!isClothing) {
-                return errorResult("No clothing detected (Saw: ${bestDetection.subTypeRaw})")
+            Log.d(
+                "ImageLabeler",
+                "ML Kit Labels: ${sortedCandidates.joinToString { "${it.label}:${it.confidence}" }}"
+            )
+
+            val allLabelsText = sortedCandidates
+                .joinToString(" ") { it.label }
+                .lowercase()
+
+            val normalized = ClothingTaxonomy.classify(
+                rawLabel = allLabelsText,
+                aiTags = sortedCandidates.map { it.label }
+            ) ?: fallbackClassification(
+                labelText = allLabelsText,
+                bitmap = originalBitmap
+            )
+
+            if (normalized == null) {
+                return errorResult(
+                    "No valid clothing detected. Detected labels: ${
+                        sortedCandidates.take(5).joinToString { it.label }
+                    }"
+                )
             }
 
-            // Categorization
-            val bestBitmapIndex = detections.indexOfFirst { it.subTypeRaw == bestDetection.subTypeRaw }
-            val sourceForCategorization = if (bestBitmapIndex != -1) passes[bestBitmapIndex] else originalBitmap
-            
-            val categoryResult = fashionAI.categorize(bestDetection, sourceForCategorization)
-            
-            val displayCategory = when {
-                bestDetection.clothingType != ClothingType.UNKNOWN -> categoryResult.subType
-                bestDetection.subTypeRaw != "unknown" -> bestDetection.subTypeRaw
-                else -> "Garment"
-            }
+            val strongestConfidence = sortedCandidates.firstOrNull()?.confidence ?: 0f
+
+            val tags = (
+                    normalized.tags +
+                            normalized.group +
+                            normalized.subcategory +
+                            sortedCandidates.take(5).map { it.label }
+                    )
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
 
             ImageAnalysisResult(
                 isClothing = true,
-                category = formatCategoryName(displayCategory),
-                tags = categoryResult.tags,
-                occasions = categoryResult.occasions.map { it.name },
-                seasons = categoryResult.seasons.map { it.name },
-                styleTypes = categoryResult.styleTypes.map { it.name },
+                category = normalized.subcategory,
+                tags = tags,
+                occasions = normalized.occasions,
+                seasons = inferSeasons(normalized),
+                styleTypes = inferStyleTypes(normalized),
                 mood = "Stylish",
-                weather = categoryResult.seasons.firstOrNull()?.name ?: "Sunny"
+                weather = inferWeather(normalized),
+                debugReason = "Detected ${normalized.subcategory} with confidence $strongestConfidence"
             )
         } catch (e: Exception) {
-            Log.e("ImageLabeler", "System Error", e)
-            errorResult("System failure")
+            Log.e("ImageLabeler", "Image analysis failed", e)
+            errorResult("Failed to analyze image: ${e.message ?: "Unknown error"}")
         }
+    }
+
+    private suspend fun analyzeBitmap(bitmap: Bitmap): List<LabelCandidate> {
+        return withContext(Dispatchers.Default) {
+            val inputImage = InputImage.fromBitmap(bitmap, 0)
+
+            val labels = labeler.process(inputImage).await()
+
+            labels.map {
+                LabelCandidate(
+                    label = it.text,
+                    confidence = it.confidence,
+                    passIndex = 0
+                )
+            }
+        }
+    }
+
+    private fun fallbackClassification(
+        labelText: String,
+        bitmap: Bitmap
+    ): ClothingClassification? {
+        val hasGenericClothingHint = labelText.hasAny(
+            "clothing",
+            "fashion",
+            "apparel",
+            "garment",
+            "textile",
+            "outerwear",
+            "footwear",
+            "dress",
+            "shirt",
+            "shoe",
+            "jeans",
+            "pants"
+        )
+
+        val hasStrongNonClothingHint = labelText.hasAny(
+            "food",
+            "animal",
+            "dog",
+            "cat",
+            "car",
+            "vehicle",
+            "furniture",
+            "chair",
+            "table",
+            "building",
+            "plant",
+            "flower",
+            "phone",
+            "laptop"
+        )
+
+        if (!hasGenericClothingHint || hasStrongNonClothingHint) {
+            return null
+        }
+
+        val aspectRatio = bitmap.width.toFloat() / bitmap.height.toFloat()
+
+        return when {
+            labelText.hasAny("footwear", "shoe", "sneaker", "boot", "sandal", "heel") ->
+                ClothingClassification(
+                    group = "Footwear",
+                    subcategory = "Shoes",
+                    occasions = listOf("Casual outing", "Party", "Office / Formal"),
+                    tags = listOf("footwear", "shoes")
+                )
+
+            aspectRatio > 1.25f ->
+                ClothingClassification(
+                    group = "Footwear",
+                    subcategory = "Shoes",
+                    occasions = listOf("Casual outing", "Party"),
+                    tags = listOf("footwear", "shoes")
+                )
+
+            aspectRatio < 0.65f ->
+                ClothingClassification(
+                    group = "One Piece",
+                    subcategory = "Dress",
+                    occasions = listOf("Party", "Date night", "Casual outing"),
+                    tags = listOf("one-piece", "dress")
+                )
+
+            else ->
+                ClothingClassification(
+                    group = "Top",
+                    subcategory = "Top",
+                    occasions = listOf("Casual outing", "Party", "Date night"),
+                    tags = listOf("top", "casual")
+                )
+        }
+    }
+
+    private fun inferSeasons(classification: ClothingClassification): List<String> {
+        val text = searchableText(classification)
+
+        return when {
+            text.hasAny("hoodie", "jacket", "boots", "winter", "mountain") ->
+                listOf("WINTER", "AUTUMN")
+
+            text.hasAny("shorts", "sleeveless", "sandals", "beach", "summer") ->
+                listOf("SUMMER", "SPRING")
+
+            else ->
+                listOf("ALL_SEASON")
+        }
+    }
+
+    private fun inferStyleTypes(classification: ClothingClassification): List<String> {
+        val text = searchableText(classification)
+
+        return when {
+            text.hasAny("office", "formal", "shirt", "blazer", "heels") ->
+                listOf("FORMAL", "SMART")
+
+            text.hasAny("party", "clubbing", "crop", "dress", "heels") ->
+                listOf("PARTY", "STYLISH")
+
+            text.hasAny("sports", "gym", "joggers", "sneakers") ->
+                listOf("SPORTY", "CASUAL")
+
+            text.hasAny("beach", "sandals", "shorts") ->
+                listOf("BEACH", "CASUAL")
+
+            else ->
+                listOf("CASUAL")
+        }
+    }
+
+    private fun inferWeather(classification: ClothingClassification): String {
+        val text = searchableText(classification)
+
+        return when {
+            text.hasAny("hoodie", "jacket", "boots", "mountain") -> "Cold"
+            text.hasAny("shorts", "sleeveless", "sandals", "beach") -> "Sunny"
+            else -> "Any"
+        }
+    }
+
+    private fun searchableText(classification: ClothingClassification): String {
+        return buildString {
+            append(classification.group)
+            append(" ")
+            append(classification.subcategory)
+            append(" ")
+            append(classification.tags.joinToString(" "))
+            append(" ")
+            append(classification.occasions.joinToString(" "))
+        }.lowercase()
     }
 
     private fun normalizeBitmap(source: Bitmap): Bitmap {
-        // Resize to max 1024 to avoid OOM and keep MediaPipe happy
         val maxDimension = 1024
         val width = source.width
         val height = source.height
-        
-        if (width <= maxDimension && height <= maxDimension && source.config == Bitmap.Config.ARGB_8888) {
-            return source
+
+        val alreadyValid = width <= maxDimension &&
+                height <= maxDimension &&
+                source.config == Bitmap.Config.ARGB_8888
+
+        if (alreadyValid) return source
+
+        val scale = minOf(
+            maxDimension.toFloat() / width,
+            maxDimension.toFloat() / height
+        )
+
+        val matrix = Matrix().apply {
+            postScale(scale, scale)
         }
 
-        val scale = Math.min(maxDimension.toFloat() / width, maxDimension.toFloat() / height)
-        val matrix = Matrix().apply { postScale(scale, scale) }
-        
-        return Bitmap.createBitmap(source, 0, 0, width, height, matrix, true)
-            .copy(Bitmap.Config.ARGB_8888, true)
-    }
-
-    private fun formatCategoryName(name: String): String {
-        return name.lowercase()
-            .replace("_", " ")
-            .split(" ")
-            .joinToString(" ") { it.replaceFirstChar { char -> char.uppercase() } }
+        return Bitmap.createBitmap(
+            source,
+            0,
+            0,
+            width,
+            height,
+            matrix,
+            true
+        ).copy(Bitmap.Config.ARGB_8888, true)
     }
 
     private fun smartCrop(source: Bitmap, factor: Double): Bitmap {
         val width = source.width
         val height = source.height
-        val newWidth = (width * factor).toInt()
-        val newHeight = (height * factor).toInt()
-        val startX = (width - newWidth) / 2
-        val startY = (height - newHeight) / 2
-        return Bitmap.createBitmap(source, startX, startY, newWidth, newHeight)
+
+        val newWidth = (width * factor).toInt().coerceAtLeast(1)
+        val newHeight = (height * factor).toInt().coerceAtLeast(1)
+
+        val startX = ((width - newWidth) / 2).coerceAtLeast(0)
+        val startY = ((height - newHeight) / 2).coerceAtLeast(0)
+
+        return Bitmap.createBitmap(
+            source,
+            startX,
+            startY,
+            newWidth.coerceAtMost(width - startX),
+            newHeight.coerceAtMost(height - startY)
+        )
     }
 
-    private fun loadBitmap(uri: Uri): Bitmap? {
-        return try {
-            context.contentResolver.openInputStream(uri)?.use { 
-                BitmapFactory.decodeStream(it)
+    private suspend fun loadBitmap(uri: Uri): Bitmap? {
+        return withContext(Dispatchers.IO) {
+            try {
+                context.contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it)
+                }
+            } catch (e: Exception) {
+                Log.e("ImageLabeler", "Bitmap load failed", e)
+                null
             }
-        } catch (e: Exception) { null }
+        }
     }
 
-    private fun errorResult(reason: String) = ImageAnalysisResult(
-        isClothing = false,
-        category = "Unknown",
-        tags = emptyList(),
-        debugReason = reason
+    private fun errorResult(reason: String): ImageAnalysisResult {
+        return ImageAnalysisResult(
+            isClothing = false,
+            category = "Unknown",
+            tags = emptyList(),
+            occasions = emptyList(),
+            seasons = emptyList(),
+            styleTypes = emptyList(),
+            debugReason = reason
+        )
+    }
+
+    private data class LabelCandidate(
+        val label: String,
+        val confidence: Float,
+        val passIndex: Int
     )
+
+    private fun String.hasAny(vararg keywords: String): Boolean {
+        return keywords.any { keyword ->
+            contains(keyword.lowercase())
+        }
+    }
 }
