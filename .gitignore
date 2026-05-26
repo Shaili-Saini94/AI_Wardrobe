@@ -33,5 +33,9 @@
 # Local configuration
 local.properties
 
-# Secrets
+# Secrets — API keys MUST NOT be committed.  See gradle.properties.example for required keys.
+gradle.properties
 .aiexclude
+
+# Agent tooling state
+.agent/

@@ -20,18 +20,45 @@ data class WardrobeGap(
     val suggestion: String
 )
 
+data class SimilarPair(
+    val itemA: ClothingItem,
+    val itemB: ClothingItem,
+    val reason: String,         // human-readable explanation
+    val similarityScore: Float  // 0..1
+)
+
 data class ColorPalette(
     val neutrals: Int,
     val blues: Int,
     val earthy: Int,
     val warm: Int,
     val cool: Int,
-    val total: Int
+    val total: Int,
+    /** Top actual color names (from dominantColor field), sorted by frequency. Max 10. */
+    val topColors: List<Pair<String, Int>> = emptyList()
 ) {
     fun dominantFamily(): String {
         val map = mapOf("Neutrals" to neutrals, "Blues" to blues,
             "Earthy" to earthy, "Warm" to warm, "Cool" to cool)
         return map.maxByOrNull { it.value }?.key ?: "Mixed"
+    }
+    /** Harmony score 0–1: high when wardrobe is mostly neutrals + 1 accent family. */
+    fun harmonyScore(): Float {
+        if (total == 0) return 0f
+        val neutralRatio = neutrals / total.toFloat()
+        val accentFamilies = listOf(blues, earthy, warm, cool).count { it > 0 }
+        return when {
+            neutralRatio > 0.7f && accentFamilies <= 1 -> 0.95f
+            neutralRatio > 0.5f && accentFamilies <= 2 -> 0.80f
+            neutralRatio > 0.3f && accentFamilies <= 3 -> 0.65f
+            else -> 0.45f
+        }
+    }
+    fun harmonyLabel(): String = when {
+        harmonyScore() >= 0.90f -> "Perfectly curated"
+        harmonyScore() >= 0.75f -> "Well balanced"
+        harmonyScore() >= 0.60f -> "Diverse mix"
+        else                    -> "Bold & eclectic"
     }
 }
 
@@ -122,26 +149,108 @@ class WardrobeIntelligence @Inject constructor(
     // ── Color palette ─────────────────────────────────────────────────────────
 
     fun buildColorPalette(items: List<ClothingItem>): ColorPalette {
-        val neutralColors = setOf("white", "black", "grey", "gray", "silver", "beige", "cream", "ivory", "ecru", "pearl", "off-white")
-        val blueColors    = setOf("navy", "blue", "denim", "teal", "cobalt", "sky", "indigo", "sky blue")
+        val neutralColors = setOf("white", "black", "grey", "gray", "silver", "beige", "cream", "ivory", "ecru", "pearl", "off-white", "charcoal", "slate")
+        val blueColors    = setOf("navy", "blue", "denim", "teal", "cobalt", "sky", "indigo")
         val earthyColors  = setOf("brown", "camel", "tan", "olive", "sage", "mustard", "khaki", "stone", "sand", "taupe", "mocha", "cognac", "chocolate")
         val warmColors    = setOf("red", "orange", "yellow", "pink", "coral", "rust", "terracotta", "scarlet", "crimson", "burgundy", "maroon", "rose", "blush", "gold", "peach", "magenta", "fuchsia")
         val coolColors    = setOf("green", "purple", "lavender", "plum", "violet", "lilac", "forest", "mint", "emerald")
 
         var neutrals = 0; var blues = 0; var earthy = 0; var warm = 0; var cool = 0
 
+        // Track actual color names for swatches
+        val colorCounts = mutableMapOf<String, Int>()
+
         for (item in items) {
-            val color = item.dominantColor?.lowercase() ?: continue
+            val raw = item.dominantColor?.lowercase()?.trim() ?: continue
+            // Normalize to canonical color name (first matching keyword)
+            val canonical = (neutralColors + blueColors + earthyColors + warmColors + coolColors)
+                .firstOrNull { raw.contains(it) } ?: raw.ifBlank { null } ?: continue
+            colorCounts[canonical] = (colorCounts[canonical] ?: 0) + 1
             when {
-                neutralColors.any { color.contains(it) } -> neutrals++
-                blueColors.any    { color.contains(it) } -> blues++
-                earthyColors.any  { color.contains(it) } -> earthy++
-                warmColors.any    { color.contains(it) } -> warm++
-                coolColors.any    { color.contains(it) } -> cool++
+                neutralColors.any { raw.contains(it) } -> neutrals++
+                blueColors.any    { raw.contains(it) } -> blues++
+                earthyColors.any  { raw.contains(it) } -> earthy++
+                warmColors.any    { raw.contains(it) } -> warm++
+                coolColors.any    { raw.contains(it) } -> cool++
             }
         }
 
-        return ColorPalette(neutrals, blues, earthy, warm, cool, items.size)
+        val topColors = colorCounts.entries
+            .sortedByDescending { it.value }
+            .take(10)
+            .map { Pair(it.key, it.value) }
+
+        return ColorPalette(neutrals, blues, earthy, warm, cool, items.size, topColors)
+    }
+
+    // ── Duplicate / Similar Item Detector ────────────────────────────────────
+
+    fun detectSimilars(items: List<ClothingItem>): List<SimilarPair> {
+        val results = mutableListOf<SimilarPair>()
+        for (i in items.indices) {
+            for (j in i + 1 until items.size) {
+                val a = items[i]
+                val b = items[j]
+                val score = computeSimilarityScore(a, b)
+                if (score >= 0.65f) {
+                    results.add(SimilarPair(a, b, buildSimilarityReason(a, b, score), score))
+                }
+            }
+        }
+        return results.sortedByDescending { it.similarityScore }.take(8)
+    }
+
+    private fun computeSimilarityScore(a: ClothingItem, b: ClothingItem): Float {
+        var score = 0f
+
+        // Same base category (strong signal)
+        if (normalizeCategory(a.category) == normalizeCategory(b.category)) score += 0.40f
+
+        // Same dominant color
+        val colorA = a.dominantColor?.lowercase()?.trim()
+        val colorB = b.dominantColor?.lowercase()?.trim()
+        if (colorA != null && colorA == colorB) score += 0.25f
+
+        // Shared occasions
+        val sharedOccasions = a.occasions.intersect(b.occasions.toSet()).size
+        score += (sharedOccasions.coerceAtMost(2) * 0.10f)
+
+        // Shared style types
+        val sharedStyles = a.styleTypes.intersect(b.styleTypes.toSet()).size
+        score += (sharedStyles.coerceAtMost(2) * 0.10f)
+
+        // Shared tags (fabric-type overlap)
+        val sharedTags = a.tags.intersect(b.tags.toSet()).size
+        score += (sharedTags.coerceAtMost(3) * 0.05f)
+
+        return score.coerceIn(0f, 1f)
+    }
+
+    private fun normalizeCategory(cat: String): String {
+        val c = cat.lowercase()
+        return when {
+            c.contains("shirt") || c.contains("tee") || c.contains("blouse") || c.contains("top") -> "top"
+            c.contains("pant") || c.contains("jean") || c.contains("trouser") -> "bottom"
+            c.contains("short") -> "shorts"
+            c.contains("skirt") -> "skirt"
+            c.contains("dress") -> "dress"
+            c.contains("shoe") || c.contains("sneaker") || c.contains("boot") -> "footwear"
+            c.contains("jacket") || c.contains("coat") -> "outerwear"
+            else -> c.take(6)
+        }
+    }
+
+    private fun buildSimilarityReason(a: ClothingItem, b: ClothingItem, score: Float): String {
+        val parts = mutableListOf<String>()
+        if (normalizeCategory(a.category) == normalizeCategory(b.category))
+            parts.add("same category (${a.category})")
+        if (!a.dominantColor.isNullOrBlank() && a.dominantColor.equals(b.dominantColor, ignoreCase = true))
+            parts.add("same color (${a.dominantColor})")
+        val sharedOcc = a.occasions.intersect(b.occasions.toSet())
+        if (sharedOcc.isNotEmpty()) parts.add("both for ${sharedOcc.first()}")
+        if (parts.isEmpty()) parts.add("similar styling and tags")
+        return parts.joinToString(", ")
+            .replaceFirstChar { it.uppercase() }
     }
 
     // ── Style DNA ─────────────────────────────────────────────────────────────

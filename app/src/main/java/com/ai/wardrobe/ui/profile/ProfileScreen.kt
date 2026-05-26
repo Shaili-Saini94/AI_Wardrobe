@@ -1,5 +1,7 @@
 package com.ai.wardrobe.ui.profile
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -364,6 +366,9 @@ fun ProfileScreen(
             }
         }
 
+        // ── Backup & Restore ────────────────────────────────────────
+        BackupRestoreSection(viewModel = viewModel)
+
         Spacer(modifier = Modifier.height(36.dp))
     }
 }
@@ -532,6 +537,78 @@ private fun GenderChip(
             color = textColor,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
         )
+    }
+}
+
+@Composable
+private fun BackupRestoreSection(viewModel: ProfileViewModel) {
+    val backupMessage by viewModel.backupMessage.collectAsState()
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.importWardrobe(it) }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 24.dp)
+    ) {
+        Text("Data & Backup", style = MaterialTheme.typography.titleMedium, color = ClosetBlack)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            "Export your wardrobe as JSON or restore from a previous backup.",
+            style = MaterialTheme.typography.bodySmall,
+            color = ClosetSecondary
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Export button
+            OutlinedButton(
+                onClick = { viewModel.exportWardrobe() },
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = RoundedCornerShape(6.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, ClosetBlack)
+            ) {
+                Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp), tint = ClosetBlack)
+                Spacer(Modifier.width(6.dp))
+                Text("BACKUP", style = MaterialTheme.typography.labelMedium, color = ClosetBlack)
+            }
+            // Import button
+            OutlinedButton(
+                onClick = { importLauncher.launch(arrayOf("application/json")) },
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = RoundedCornerShape(6.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, ClosetBlack)
+            ) {
+                Icon(Icons.Rounded.Upload, contentDescription = null, modifier = Modifier.size(16.dp), tint = ClosetBlack)
+                Spacer(Modifier.width(6.dp))
+                Text("RESTORE", style = MaterialTheme.typography.labelMedium, color = ClosetBlack)
+            }
+        }
+
+        if (backupMessage != null) {
+            Spacer(Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ClosetStatsBg)
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = backupMessage!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ClosetSecondary
+                )
+            }
+        }
     }
 }
 

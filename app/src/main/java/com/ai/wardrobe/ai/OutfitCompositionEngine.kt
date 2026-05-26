@@ -247,6 +247,68 @@ class OutfitCompositionEngine @Inject constructor() {
         val prof: Float
     )
 
+    // ── Occasion hard-exclusion rules ────────────────────────────────────────
+    // Maps occasion → categories that should NEVER appear in those outfits.
+    // This prevents e.g. a Lehenga or Saree in a "Work" or "Gym" outfit.
+    private val occasionExclusions: Map<String, Set<String>> = mapOf(
+        "Work"         to setOf("lehenga", "saree", "ghagra", "chaniya", "sharara", "bridal", "gown"),
+        "Gym"          to setOf("lehenga", "saree", "dress", "kurta", "blazer", "formal", "gown",
+                                "ghagra", "chaniya", "sharara", "trench", "sherwani"),
+        "Formal Event" to setOf("gym", "shorts", "jogger", "hoodie", "sweatshirt", "crop tee",
+                                "board shorts", "cycling shorts", "muscle tee"),
+        "Beach"        to setOf("blazer", "formal shirt", "trousers", "sherwani", "bandhgala",
+                                "lehenga", "saree", "gown"),
+        "Date Night"   to setOf("gym", "jogger", "sweatshirt", "cycling shorts")
+    )
+
+    /**
+     * Returns true if this combo contains any item that is explicitly
+     * excluded from the target occasion.
+     */
+    private fun hasOccasionConflict(combo: List<ClothingItem>, occasion: String): Boolean {
+        if (occasion.isBlank() || occasion.equals("Any", ignoreCase = true)) return false
+        val exclusions = occasionExclusions[occasion] ?: return false
+        return combo.any { item ->
+            val cat = item.category.lowercase()
+            exclusions.any { excl -> cat.contains(excl) }
+        }
+    }
+
+    // ── Ethnic female garments ────────────────────────────────────────────────
+    // These should only be paired with ethnic/open footwear (sandals, juttis,
+    // kolhapuri, heels) — never with western closed shoes (sneakers, oxfords,
+    // chelsea boots, loafers etc.)
+
+    private val ethnicFemaleKeywords = setOf(
+        "kurta", "kurti", "lehenga", "saree", "anarkali", "sharara",
+        "chaniya", "ghagra", "palazzo set", "sharara set", "salwar",
+        "churidar", "indo-western kurta", "a-line kurta", "straight kurta"
+    )
+
+    // Western closed-toe shoes that clash with ethnic Indian female wear
+    private val westernShoeKeywords = setOf(
+        "sneaker", "oxford shoe", "chelsea", "loafer", "slip-on shoe",
+        "sports shoe", "platform shoe", "oxford", "derby", "brogue",
+        "boat shoe", "ballet flat"
+    )
+
+    /**
+     * Returns true if the combo pairs ethnic female clothing with
+     * western closed-toe shoes — culturally and stylistically mismatched.
+     */
+    private fun hasEthnicShoeConflict(combo: List<ClothingItem>): Boolean {
+        val hasEthnic = combo.any { item ->
+            val cat = item.category.lowercase()
+            ethnicFemaleKeywords.any { cat.contains(it) }
+        }
+        if (!hasEthnic) return false
+
+        return combo.any { item ->
+            val cat = item.category.lowercase()
+            westernShoeKeywords.any { cat.contains(it) }
+        }
+    }
+
     // ── Outfit generation ────────────────────────────────────────────────────
     fun generate(
         items: List<ClothingItem>,
@@ -298,7 +360,21 @@ class OutfitCompositionEngine @Inject constructor() {
 
         if (candidates.isEmpty()) return emptyList()
 
-        val scored = candidates.map { combo ->
+        // Remove combos with explicit occasion conflict OR ethnic-shoe mismatch
+        val filtered = candidates
+            .filter { combo ->
+                val okOccasion = occasion.isBlank() || occasion.equals("Any", ignoreCase = true)
+                               || !hasOccasionConflict(combo, occasion)
+                val okEthnic   = !hasEthnicShoeConflict(combo)
+                okOccasion && okEthnic
+            }
+            .ifEmpty { candidates }  // if all are removed, fall back to unfiltered (lenient)
+
+        // Minimum occasion score: when a specific occasion is requested (not "Any"),
+        // drop outfits where NONE of the items match that occasion.
+        val minOccScore = if (!occasion.isBlank() && !occasion.equals("Any", ignoreCase = true)) 0.01f else 0f
+
+        val scored = filtered.map { combo ->
             val color = harmonyOfOutfit(combo)
             val style = styleConsistency(combo)
             val occ   = occasionFit(combo, occasion)
@@ -307,6 +383,20 @@ class OutfitCompositionEngine @Inject constructor() {
             val total = (color * 0.25f) + (style * 0.30f) + (occ * 0.20f) +
                         (sea * 0.15f) + (prof * 0.10f)
             Scored(combo, total, color, style, occ, sea, prof)
+        }
+        .filter { it.occ >= minOccScore }
+        .ifEmpty {
+            // If strict filtering removed everything, fall back without the occasion filter
+            filtered.map { combo ->
+                val color = harmonyOfOutfit(combo)
+                val style = styleConsistency(combo)
+                val occ   = occasionFit(combo, occasion)
+                val sea   = seasonFit(combo, season)
+                val prof  = profileFit(combo, profile)
+                val total = (color * 0.25f) + (style * 0.30f) + (occ * 0.20f) +
+                            (sea * 0.15f) + (prof * 0.10f)
+                Scored(combo, total, color, style, occ, sea, prof)
+            }
         }
         .sortedByDescending { it.total }
         .distinctBy { it.items.mapNotNull(ClothingItem::id).toSet() }
@@ -321,58 +411,327 @@ class OutfitCompositionEngine @Inject constructor() {
                     .groupingBy { it }.eachCount()
                     .maxByOrNull { it.value }?.key ?: "Casual"
 
+            val trend      = detectTrend(s.items)
+            val colorStory = buildColorStory(s.items, s.color)
+            val outfitName = buildOutfitName(s.items, dominantStyle, outfitOccasion, trend)
+            val styleNote  = buildStyleNote(s.items, dominantStyle, trend)
+            val whyWorks   = buildWhyItWorks(s, s.items, colorStory)
+
             Outfit(
-                name         = "$dominantStyle $outfitOccasion",
+                name         = outfitName,
                 styleType    = dominantStyle,
                 occasionType = outfitOccasion,
                 items        = s.items,
-                styleNote    = describeStyle(s.style, dominantStyle),
+                styleNote    = styleNote,
                 weatherNote  = describeWeather(s.sea, season),
-                colorStory   = describePalette(s.items, s.color),
-                whyItWorks   = describeWhy(s),
+                colorStory   = colorStory,
+                whyItWorks   = whyWorks,
                 dateCreated  = System.currentTimeMillis()
             )
         }
     }
 
-    // ── Descriptions ─────────────────────────────────────────────────────────
-    private fun describePalette(items: List<ClothingItem>, harmonyScore: Float): String {
-        val foundColors = items.flatMap { it.tags }
-            .mapNotNull { tag -> colorMap.entries.firstOrNull { tag.lowercase().contains(it.key) }?.key }
-            .distinct().take(2)
-        if (foundColors.isEmpty()) return "A balanced everyday palette."
-        val joined = foundColors.joinToString(" and ") { it.replaceFirstChar(Char::titlecase) }
+    // ── Trend detection ───────────────────────────────────────────────────────
+
+    private enum class Trend {
+        MONOCHROME, TONAL, COLOR_BLOCK, EARTH_TONES, PASTEL_POP,
+        POWER_DRESSING, STREET_LUXE, ETHNIC_FUSION, ATHLEISURE_CHIC,
+        COASTAL_COOL, NONE
+    }
+
+    private fun detectTrend(items: List<ClothingItem>): Trend {
+        val colors   = items.map { getItemColor(it) }
+        val families = colors.map { colorFamilyOf(it) }
+        val styles   = items.flatMap { it.styleTypes }
+        val cats     = items.map { it.category.lowercase() }
+
+        val neutralFamilies = setOf(ColorFamily.NEUTRAL_LIGHT, ColorFamily.NEUTRAL_DARK,
+                                    ColorFamily.NEUTRAL_MID, ColorFamily.NEUTRAL_WARM)
+
+        // Monochrome — all items same color family
+        if (families.distinct().size == 1) return Trend.MONOCHROME
+
+        // Tonal — all items within 1–2 close families (e.g. beige + tan + cream)
+        val allNeutral = families.all { it in neutralFamilies }
+        if (allNeutral && families.distinct().size <= 2) return Trend.TONAL
+
+        // Earth tones — majority warm neutrals + brown/olive
+        val earthColors = setOf(ColorFamily.NEUTRAL_WARM, ColorFamily.BROWN, ColorFamily.ORANGE, ColorFamily.GREEN)
+        if (families.count { it in earthColors } >= (families.size * 0.7f)) return Trend.EARTH_TONES
+
+        // Pastel pop — pinks, lavenders, light blues, creams
+        val pastelFamilies = setOf(ColorFamily.PINK, ColorFamily.PURPLE, ColorFamily.NEUTRAL_LIGHT)
+        if (families.count { it in pastelFamilies } >= (families.size * 0.6f)) return Trend.PASTEL_POP
+
+        // Color block — exactly 2 bold contrasting color families
+        val boldFamilies = families.filter { it !in neutralFamilies }
+        if (boldFamilies.distinct().size == 2 && items.size >= 2) return Trend.COLOR_BLOCK
+
+        // Power dressing — blazer/formal + tailored trousers
+        val hasBlazer  = cats.any { "blazer" in it || "formal" in it }
+        val hasTailored = cats.any { "trouser" in it || "chino" in it || "formal pants" in it }
+        if (hasBlazer && hasTailored) return Trend.POWER_DRESSING
+
+        // Street luxe — streetwear items + one elevated piece (blazer/leather)
+        val streetItems  = styles.count { it in setOf("Streetwear", "Athleisure") }
+        val luxeItems    = cats.count { "blazer" in it || "leather" in it || "trench" in it }
+        if (streetItems >= 1 && luxeItems >= 1) return Trend.STREET_LUXE
+
+        // Ethnic fusion — mix of ethnic + western
+        val ethnicItems  = styles.count { it == "Ethnic" }
+        val westernItems = styles.count { it in setOf("Casual", "Classic", "Minimalist", "Smart Casual") }
+        if (ethnicItems >= 1 && westernItems >= 1) return Trend.ETHNIC_FUSION
+
+        // Athleisure chic — sporty items styled up
+        val athItems = styles.count { it == "Athleisure" }
+        if (athItems >= 2) return Trend.ATHLEISURE_CHIC
+
+        // Coastal cool — light colors + sandals/shorts/linen
+        val isCoastal = cats.any { "sandal" in it || "shorts" in it || "linen" in it }
+        val isLight   = families.count { it == ColorFamily.NEUTRAL_LIGHT || it == ColorFamily.BLUE } >= (families.size * 0.5f)
+        if (isCoastal && isLight) return Trend.COASTAL_COOL
+
+        return Trend.NONE
+    }
+
+    // ── Color helpers ─────────────────────────────────────────────────────────
+
+    /** Gets the best color for an item: dominantColor field first, then tags. */
+    private fun getItemColor(item: ClothingItem): String {
+        val dominant = item.dominantColor
+        if (!dominant.isNullOrBlank()) return dominant.lowercase()
+        return item.tags.firstOrNull { tag ->
+            colorMap.keys.any { tag.lowercase().contains(it) }
+        }?.lowercase() ?: "unknown"
+    }
+
+    private fun colorFamilyOf(colorStr: String): ColorFamily {
+        val c = colorStr.lowercase()
+        for ((name, family) in colorMap) {
+            if (c.contains(name)) return family
+        }
+        return ColorFamily.UNKNOWN
+    }
+
+    private fun colorLabel(colorStr: String): String {
+        val c = colorStr.lowercase()
+        for (name in colorMap.keys) {
+            if (c.contains(name)) return name.replaceFirstChar(Char::titlecase)
+        }
+        return colorStr.replaceFirstChar(Char::titlecase).ifBlank { "Neutral" }
+    }
+
+    // ── Smart outfit naming ───────────────────────────────────────────────────
+
+    /** Maps color names to editorial / fashion-forward adjectives. */
+    private fun colorEditorial(colorStr: String): String {
+        val c = colorStr.lowercase()
         return when {
-            harmonyScore > 0.85f -> "$joined — a quietly confident palette."
-            harmonyScore > 0.70f -> "$joined — a deliberate, harmonious pairing."
-            else                 -> "$joined — a bold contrast play."
+            "black"  in c || "charcoal" in c || "jet" in c  -> "Noir"
+            "white"  in c || "ivory" in c || "cream" in c   -> "Blanc"
+            "navy"   in c || "indigo" in c                   -> "Midnight"
+            "grey"   in c || "gray"  in c || "slate" in c   -> "Slate"
+            "beige"  in c || "sand"  in c || "ecru"  in c   -> "Sand"
+            "tan"    in c || "camel" in c || "stone" in c   -> "Stone"
+            "brown"  in c || "mocha" in c || "chocolate" in c -> "Cocoa"
+            "red"    in c || "scarlet" in c                  -> "Scarlet"
+            "crimson" in c || "burgundy" in c || "maroon" in c || "wine" in c -> "Bordeaux"
+            "orange" in c || "rust" in c || "terracotta" in c -> "Rust"
+            "coral"  in c || "peach" in c                    -> "Peach"
+            "yellow" in c || "mustard" in c                  -> "Saffron"
+            "gold"   in c                                    -> "Gold"
+            "green"  in c || "olive" in c || "sage" in c    -> "Sage"
+            "emerald" in c || "forest" in c                  -> "Forest"
+            "mint"   in c || "teal" in c || "turquoise" in c  -> "Jade"
+            "blue"   in c || "cobalt" in c || "sky" in c    -> "Azure"
+            "denim"  in c                                    -> "Denim"
+            "purple" in c || "plum" in c || "violet" in c   -> "Plum"
+            "lavender" in c || "lilac" in c                  -> "Lavender"
+            "pink"   in c || "blush" in c || "rose" in c    -> "Rose"
+            "magenta" in c || "fuchsia" in c                 -> "Fuchsia"
+            else -> colorStr.replaceFirstChar(Char::titlecase).ifBlank { "Neutral" }
         }
     }
 
-    private fun describeStyle(score: Float, style: String): String = when {
-        score > 0.85f -> "Consistent $style styling — every piece earns its place."
-        score > 0.65f -> "$style direction with a confident, intentional feel."
-        else          -> "A mixed-style play that reads modern and unexpected."
+    /** Gets a material/fabric hint from item tags. */
+    private fun materialHint(items: List<ClothingItem>): String? {
+        val fabricWords = listOf("linen", "denim", "silk", "knit", "leather", "cotton",
+            "chiffon", "satin", "velvet", "wool", "cashmere", "suede", "flannel")
+        return items.flatMap { it.tags }.firstOrNull { tag ->
+            fabricWords.any { fab -> tag.lowercase().contains(fab) }
+        }?.lowercase()?.replaceFirstChar(Char::titlecase)
     }
+
+    private fun buildOutfitName(
+        items: List<ClothingItem>, style: String, occasion: String, trend: Trend
+    ): String {
+        val keyItem  = items.firstOrNull { slotOf(it) == Slot.TOP || slotOf(it) == Slot.FULL }
+            ?: items.first()
+        val keyColor = colorEditorial(getItemColor(keyItem))   // editorial adjective
+        val fabric   = materialHint(items)
+        val cats     = items.map { it.category.lowercase() }
+        val hasBlazer = cats.any { "blazer" in it }
+        val hasJacket = cats.any { "jacket" in it || "coat" in it }
+        val hasBoots  = cats.any { "boot" in it }
+        val hasKurta  = cats.any { "kurta" in it || "kurti" in it }
+        val hasLehenga = cats.any { "lehenga" in it }
+        val hasSaree  = cats.any { "saree" in it }
+        val hasSherwani = cats.any { "sherwani" in it }
+
+        // Trend-aware names — specific and editorial
+        val trendName: String? = when (trend) {
+            Trend.MONOCHROME      -> when {
+                keyColor == "Noir"  -> "All Black Everything"
+                keyColor == "Blanc" -> "Clean White Edit"
+                keyColor == "Slate" -> "Grey Zone"
+                else                -> "$keyColor Head-to-Toe"
+            }
+            Trend.TONAL           -> "$keyColor Tonal Stack"
+            Trend.COLOR_BLOCK     -> {
+                val colors = items.map { colorEditorial(getItemColor(it)) }.distinct().take(2)
+                if (colors.size >= 2) "${colors[0]} × ${colors[1]}" else "$keyColor Block"
+            }
+            Trend.EARTH_TONES     -> if (fabric != null) "The $fabric Earth Edit" else "Earthy Roots"
+            Trend.PASTEL_POP      -> "$keyColor Soft Hour"
+            Trend.POWER_DRESSING  -> if (hasBlazer) "Boardroom $keyColor" else "Power Shift"
+            Trend.STREET_LUXE     -> "Elevated Street"
+            Trend.ETHNIC_FUSION   -> "Heritage Modern"
+            Trend.ATHLEISURE_CHIC -> "Move In Style"
+            Trend.COASTAL_COOL    -> "Off-Duty $keyColor"
+            Trend.NONE            -> null
+        }
+        if (trendName != null) return trendName
+
+        // Occasion-specific names
+        return when {
+            occasion == "Work" && hasBlazer      -> "$keyColor Power Hour"
+            occasion == "Work"                   -> "$keyColor Work Edit"
+            occasion == "Date Night" && hasBoots -> "$keyColor Night Out"
+            occasion == "Date Night"             -> "$keyColor After Dark"
+            occasion == "Gym"                    -> "The Active Set"
+            occasion == "Beach"  && fabric != null -> "$fabric Beach Day"
+            occasion == "Beach"                  -> "$keyColor Shore Side"
+            occasion == "Festival" && hasLehenga -> "$keyColor Festival Drape"
+            occasion == "Festival"               -> "$keyColor Festival Edit"
+            occasion == "Wedding" && hasLehenga  -> "The $keyColor Lehenga Look"
+            occasion == "Wedding" && hasSaree    -> "The $keyColor Saree Edit"
+            occasion == "Wedding" && hasSherwani -> "$keyColor Sherwani Moment"
+            occasion == "Wedding"                -> "$keyColor Occasion Wear"
+            style == "Ethnic" && hasKurta        -> "$keyColor Ethnic Story"
+            style == "Ethnic"                    -> "Ethnic $keyColor"
+            style == "Formal" && hasBlazer       -> "The $keyColor Suit"
+            style == "Formal"                    -> "$keyColor Formal"
+            style == "Minimalist" && fabric != null -> "The $fabric Minimal"
+            style == "Minimalist"                -> "$keyColor Pared Back"
+            style == "Streetwear" && hasJacket   -> "$keyColor Street Layer"
+            style == "Streetwear"                -> "$keyColor Street Wear"
+            style == "Bohemian"                  -> "$keyColor Free Spirit"
+            style == "Classic"                   -> "The $keyColor Classic"
+            style == "Smart Casual"              -> "$keyColor Smart Hour"
+            style == "Athleisure"                -> "Move Easy"
+            fabric != null                       -> "The $fabric $keyColor"
+            else                                 -> "$keyColor Edit"
+        }
+    }
+
+    // ── Smart color story ─────────────────────────────────────────────────────
+
+    private fun buildColorStory(items: List<ClothingItem>, harmonyScore: Float): String {
+        val colors = items.map { colorLabel(getItemColor(it)) }.distinct().take(3)
+        if (colors.isEmpty() || colors.all { it == "Neutral" || it == "Unknown" }) {
+            return "A clean, versatile palette that works across seasons."
+        }
+        val palette = colors.joinToString(" × ")
+        return when {
+            harmonyScore > 0.88f ->
+                "$palette — a perfectly balanced palette. Zero effort, maximum impact."
+            harmonyScore > 0.75f ->
+                "$palette — a deliberate, harmonious combination with natural visual flow."
+            harmonyScore > 0.60f ->
+                "$palette — complementary tones that create a polished contrast."
+            else ->
+                "$palette — a bold, high-contrast statement that stands out."
+        }
+    }
+
+    // ── Smart style note ──────────────────────────────────────────────────────
+
+    private fun buildStyleNote(items: List<ClothingItem>, style: String, trend: Trend): String {
+        val itemNames = items.map { it.category }.take(3)
+        val colorNames = items.map { colorLabel(getItemColor(it)) }.distinct().take(2)
+        val palette = colorNames.joinToString(" and ")
+
+        return when (trend) {
+            Trend.MONOCHROME ->
+                "A head-to-toe $palette monochrome look — one of the strongest signals in current fashion."
+            Trend.TONAL ->
+                "Tonal dressing at its best: layering $palette shades for effortless depth."
+            Trend.COLOR_BLOCK ->
+                "Bold colour blocking with ${colorNames.getOrElse(0) { "contrasting" }} and ${colorNames.getOrElse(1) { "pieces" }} — a runway-ready technique."
+            Trend.EARTH_TONES ->
+                "Earth tones are dominating runways this season. Warm, grounded, and effortlessly chic."
+            Trend.PASTEL_POP ->
+                "Soft pastels for a dreamy, feminine edit — one of the standout trends this season."
+            Trend.POWER_DRESSING ->
+                "Sharp power dressing: structured ${itemNames.firstOrNull { "blazer" in it.lowercase() || "jacket" in it.lowercase() } ?: "jacket"} elevates the entire look."
+            Trend.STREET_LUXE ->
+                "Street meets luxury — the elevated casual aesthetic dominating global street style."
+            Trend.ETHNIC_FUSION ->
+                "Indo-western fusion: traditional meets contemporary for a modern cultural statement."
+            Trend.ATHLEISURE_CHIC ->
+                "Athleisure done right — sporty pieces styled with intention."
+            Trend.COASTAL_COOL ->
+                "Light fabrics, open silhouettes — effortlessly coastal and season-appropriate."
+            Trend.NONE ->
+                "A well-composed $style look: ${itemNames.take(2).joinToString(" + ")} in $palette."
+        }
+    }
+
+    // ── Smart "why it works" ──────────────────────────────────────────────────
+
+    private fun buildWhyItWorks(s: Scored, items: List<ClothingItem>, colorStory: String): String {
+        val colors    = items.map { colorLabel(getItemColor(it)) }.distinct()
+        val families  = colors.map { colorFamilyOf(it) }
+        val neutralFamilies = setOf(ColorFamily.NEUTRAL_LIGHT, ColorFamily.NEUTRAL_DARK,
+                                    ColorFamily.NEUTRAL_MID, ColorFamily.NEUTRAL_WARM)
+        val allNeutral = families.all { it in neutralFamilies }
+
+        val colorReason = when {
+            s.color > 0.88f && allNeutral ->
+                "The all-neutral palette is timeless — these tones never clash."
+            s.color > 0.88f ->
+                "${colors.take(2).joinToString(" and ")} sit in the same colour family, creating harmony."
+            s.color > 0.72f ->
+                "The ${colors.firstOrNull() ?: "colors"} act as a strong anchor, letting the other pieces support it."
+            else ->
+                "The contrast between ${colors.getOrElse(0) { "these" }} and ${colors.getOrElse(1) { "those" }} creates intentional visual tension."
+        }
+
+        val styleReason = when {
+            s.style > 0.85f -> "Style codes align tightly — every piece speaks the same language."
+            s.style > 0.65f -> "The style mix is intentional and reads as modern layering."
+            else            -> "The varied styles give this look an eclectic, editorial quality."
+        }
+
+        val formality = items.flatMap { it.styleTypes }
+        val formalCount  = formality.count { it in setOf("Formal", "Classic", "Smart Casual") }
+        val casualCount  = formality.count { it in setOf("Casual", "Streetwear", "Athleisure") }
+        val formalReason = when {
+            formalCount > 0 && casualCount == 0 -> "Fully formal — dressed for impact."
+            casualCount > 0 && formalCount == 0 -> "Relaxed and cohesive — great for off-duty dressing."
+            formalCount > 0 && casualCount > 0  -> "Smart-casual balance — versatile enough to dress up or down."
+            else -> ""
+        }
+
+        return listOf(colorReason, styleReason, formalReason)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+    }
+
+    // ── Weather ───────────────────────────────────────────────────────────────
 
     private fun describeWeather(score: Float, season: String): String =
-        if (season.isBlank()) "Year-round versatility."
-        else if (score > 0.7f) "Built for $season — fabrics and coverage suit the conditions."
-        else "Works for $season with light layering."
-
-    private fun describeWhy(s: Scored): String {
-        val top = listOf(
-            "color"    to s.color,
-            "style"    to s.style,
-            "occasion" to s.occ,
-            "season"   to s.sea
-        ).maxByOrNull { it.second }
-        return when (top?.first) {
-            "color"    -> "Strongest on color harmony — the palette pulls everything together."
-            "style"    -> "Tight style consistency keeps it polished and intentional."
-            "occasion" -> "Every piece is appropriate for the moment."
-            "season"   -> "Seasonally coherent — wearable as a real outfit today."
-            else       -> "A balanced match to your style preferences."
-        }
-    }
+        if (season.isBlank()) "Works across seasons — layer up or down as needed."
+        else if (score > 0.7f) "Well-suited for $season — the fabrics and layers work for the conditions."
+        else "Adaptable for $season with a light layer adjustment."
 }

@@ -75,6 +75,25 @@ class WardrobeViewModel @Inject constructor(
     private val _itemToEdit = MutableStateFlow<ClothingItem?>(null)
     val itemToEdit: StateFlow<ClothingItem?> = _itemToEdit.asStateFlow()
 
+    // ── Product shot comparison state ─────────────────────────────────────────
+    // ID of the item currently having ANY product shot generated (null when idle)
+    private val _productShotGeneratingId = MutableStateFlow<Long?>(null)
+    val productShotGeneratingId: StateFlow<Long?> = _productShotGeneratingId.asStateFlow()
+
+    /**
+     * Comparison sheet state.  When non-null, the comparison UI is open for an item.
+     * Each entry maps a method → its current state (Generating / Done(path) / Failed).
+     */
+    data class ProductShotState(val item: ClothingItem, val results: Map<GeminiClothingAnalyzer.ProductShotMethod, MethodResult>)
+    sealed class MethodResult {
+        data object Idle : MethodResult()
+        data object Generating : MethodResult()
+        data class Done(val path: String) : MethodResult()
+        data class Failed(val message: String) : MethodResult()
+    }
+    private val _productShotSheet = MutableStateFlow<ProductShotState?>(null)
+    val productShotSheet: StateFlow<ProductShotState?> = _productShotSheet.asStateFlow()
+
     // ── Search & vibe filter ──────────────────────────────────────────────────
 
     private val _searchQuery = MutableStateFlow("")
@@ -225,6 +244,82 @@ class WardrobeViewModel @Inject constructor(
             repository.updateClothingItem(item)
             _itemToEdit.value = null
         }
+    }
+
+    // ── Product shot comparison (Pollinations + Cloudflare FLUX + Cloudflare img2img) ──
+
+    /**
+     * Opens the product-shot comparison sheet for [item] and fires off ALL THREE
+     * generation methods in parallel.  Each result lands in [productShotSheet] as
+     * it completes so the UI can show progress per-method.
+     */
+    fun openProductShotComparison(context: Context, item: ClothingItem) {
+        val id = item.id ?: return
+        if (_productShotGeneratingId.value != null) return  // another job already running
+
+        _productShotGeneratingId.value = id
+        // Initialise all 3 methods to Generating
+        val initial = GeminiClothingAnalyzer.ProductShotMethod.values()
+            .associateWith { MethodResult.Generating as MethodResult }
+        _productShotSheet.value = ProductShotState(item, initial)
+        _errorMessage.value = null
+
+        viewModelScope.launch {
+            val base64 = withContext(Dispatchers.IO) {
+                uriToBase64(context, android.net.Uri.parse(item.imageUri))
+            }
+            if (base64 == null) {
+                _productShotSheet.value = _productShotSheet.value?.copy(
+                    results = initial.mapValues { MethodResult.Failed("Couldn't load photo") }
+                )
+                _productShotGeneratingId.value = null
+                return@launch
+            }
+
+            // Fire each method as its own coroutine so they run in parallel
+            for (method in GeminiClothingAnalyzer.ProductShotMethod.values()) {
+                launch {
+                    val path = try {
+                        gemini.generateProductShot(
+                            method        = method,
+                            base64Image   = base64,
+                            category      = item.category,
+                            dominantColor = item.dominantColor,
+                            tags          = item.tags
+                        )
+                    } catch (e: Exception) { null }
+
+                    // Update only this method's slot
+                    val currentSheet = _productShotSheet.value
+                    if (currentSheet != null && currentSheet.item.id == id) {
+                        val newResults = currentSheet.results.toMutableMap().also { map ->
+                            map[method] = if (path != null) MethodResult.Done(path)
+                                          else MethodResult.Failed("Couldn't generate")
+                        }
+                        _productShotSheet.value = currentSheet.copy(results = newResults)
+                    }
+
+                    // If all 3 are no-longer-Generating, clear the running flag
+                    val updated = _productShotSheet.value
+                    if (updated != null && updated.results.values.none { it is MethodResult.Generating }) {
+                        _productShotGeneratingId.value = null
+                    }
+                }
+            }
+        }
+    }
+
+    /** User picked a generated product shot — save it as the item's front thumbnail. */
+    fun acceptProductShot(itemId: Long, productShotPath: String) {
+        viewModelScope.launch {
+            repository.updateThumbnailUri(itemId, productShotPath)
+            _productShotSheet.value = null
+            _errorMessage.value = "Product shot saved ✨"
+        }
+    }
+
+    fun dismissProductShotSheet() {
+        _productShotSheet.value = null
     }
 
     // ── Wear history ──────────────────────────────────────────────────────────

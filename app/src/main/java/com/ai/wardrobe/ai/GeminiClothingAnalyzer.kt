@@ -60,13 +60,15 @@ class GeminiClothingAnalyzer @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val apiKey  = BuildConfig.GEMINI_API_KEY
+    // Google retired the free tier for Gemini 2.0 (limit: 0) and removed 1.5 entirely.
+    // The 2.5-series and the "latest" aliases still have free-tier quota available.
     private val models  = listOf(
-        "gemini-2.0-flash-lite",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash-latest"
+        "gemini-2.5-flash-lite",      // fastest 2.5, free tier active
+        "gemini-flash-lite-latest",   // alias → currently 2.5-flash-lite
+        "gemini-2.5-flash",           // bigger 2.5, free tier active
+        "gemini-flash-latest"         // alias → currently 2.5-flash
     )
-    private val baseUrl = "https://generativelanguage.googleapis.com/v1/models"
-    private val baseUrlV1b = "https://generativelanguage.googleapis.com/v1beta/models"
+    private val baseUrl = "https://generativelanguage.googleapis.com/v1beta/models"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -118,24 +120,32 @@ class GeminiClothingAnalyzer @Inject constructor(
                 ]
 
                 RULES:
-                - ONLY include actual garments/clothing — NO jewelry, NO accessories
-                - Each garment gets its OWN array entry
-                - Only list occasions that genuinely apply (1-4 max)
+                - ONLY include actual physical garments/clothing — NO jewelry, NO accessories
+                - Each garment gets its OWN separate array entry
+                - Only list occasions that genuinely apply (1–4 max)
                 - Only list seasons that genuinely apply
+                - Be SPECIFIC: "Black Skinny Jeans" not just "Jeans"; "Knitted Crew Neck Sweater" not just "Sweater"
 
-                If NO clothing/garments are visible, return:
-                [{"isClothing": false, "reason": "brief description of what you see"}]
+                REJECT these immediately with isClothing: false — do NOT classify them as clothing:
+                - Screenshots of phone apps, websites, or any digital UI
+                - Product listings, catalogue images, or illustrations
+                - Images of people without visible clothing items
+                - Photos of rooms, objects, food, or anything non-clothing
+                - Blurry or unclear images where no garment can be identified
+
+                If NO real clothing/garments are clearly visible, return:
+                [{"isClothing": false, "reason": "clear explanation — e.g. This is a screenshot of a mobile app, not a clothing photo"}]
             """.trimIndent()
 
             val responseText = callGemini(buildRequestBody(prompt, base64Image))
-                ?: return@withContext listOf(errorResult("AI is busy. Please wait a moment and try again."))
+                ?: throw java.io.IOException("All Gemini models unavailable")
 
             Log.d("GeminiAI", "Multi-item analysis: $responseText")
             parseMultipleClothingItems(responseText.cleanJson())
 
         } catch (e: Exception) {
             Log.e("GeminiAI", "Multi-item analysis failed", e)
-            listOf(errorResult("Analysis failed: ${e.message}"))
+            throw e   // propagate so ImageLabeler can fall back to TFLite
         }
     }
 
@@ -286,6 +296,227 @@ class GeminiClothingAnalyzer @Inject constructor(
     }
 
     /**
+     * Enum of available product-shot generation methods for the side-by-side test.
+     */
+    enum class ProductShotMethod(val label: String) {
+        POLLINATIONS("Pollinations.ai (free, text→image)"),
+        CLOUDFLARE_FLUX("Cloudflare FLUX (text→image)"),
+        CLOUDFLARE_IMG2IMG("Cloudflare SDXL (image→image, keeps your garment)")
+    }
+
+    /**
+     * Generates a product shot using the selected [method].  Returns the absolute
+     * file path of the saved PNG, or null on failure.
+     */
+    suspend fun generateProductShot(
+        method: ProductShotMethod,
+        base64Image: String,
+        category: String,
+        dominantColor: String? = null,
+        tags: List<String> = emptyList()
+    ): String? = withContext(Dispatchers.IO) {
+        when (method) {
+            ProductShotMethod.POLLINATIONS         -> generateViaPollinations(category, dominantColor, tags)
+            ProductShotMethod.CLOUDFLARE_FLUX      -> generateViaCloudflareFlux(category, dominantColor, tags)
+            ProductShotMethod.CLOUDFLARE_IMG2IMG   -> generateViaCloudflareImg2img(base64Image, category, dominantColor)
+        }
+    }
+
+    // ── 1. Pollinations.ai (free, no auth) ──────────────────────────────────
+
+    private fun generateViaPollinations(category: String, color: String?, tags: List<String>): String? {
+        return try {
+            val prompt = buildShotPrompt(category, color, tags)
+            val encoded = java.net.URLEncoder.encode(prompt, "UTF-8")
+            val url = "https://image.pollinations.ai/prompt/$encoded" +
+                "?width=768&height=768&nologo=true&enhance=true&seed=" + (0..999_999).random()
+
+            Log.d("ProductShot", "Pollinations: $url")
+            val response = client.newCall(Request.Builder().url(url).get().build()).execute()
+            val bytes    = response.body?.bytes()
+            response.close()
+            if (!response.isSuccessful || bytes == null || bytes.size < 1024) {
+                Log.w("ProductShot", "Pollinations HTTP ${response.code}, bytes=${bytes?.size ?: 0}")
+                return null
+            }
+            saveImageBytes(bytes, "product_polli", "pollinations")
+        } catch (e: Exception) {
+            Log.e("ProductShot", "Pollinations failed: ${e.message}"); null
+        }
+    }
+
+    // ── 2. Cloudflare Workers AI — FLUX text-to-image ───────────────────────
+
+    private fun generateViaCloudflareFlux(category: String, color: String?, tags: List<String>): String? {
+        return try {
+            val prompt = buildShotPrompt(category, color, tags)
+            val body   = JSONObject().apply {
+                put("prompt", prompt)
+                put("steps", 8)  // flux-1-schnell supports up to 8 steps
+            }.toString()
+            val bytes = callCloudflareAi("@cf/black-forest-labs/flux-1-schnell", body) ?: return null
+            saveImageBytes(bytes, "product_cf_flux", "cloudflare-flux")
+        } catch (e: Exception) {
+            Log.e("ProductShot", "CF FLUX failed: ${e.message}"); null
+        }
+    }
+
+    // ── 3. Cloudflare Workers AI — Stable Diffusion v1.5 image-to-image ─────
+    //     This is the ONLY Cloudflare model that accepts an "image" input tensor
+    //     (the base SDXL model is text-to-image only).
+
+    private fun generateViaCloudflareImg2img(base64Image: String, category: String, color: String?): String? {
+        return try {
+            val colorHint = if (!color.isNullOrBlank()) "${color.trim()} " else ""
+            val prompt = "Professional e-commerce product photograph of the same $colorHint$category " +
+                "shown in the input image, placed on a soft cream studio background hex F5F0E8, " +
+                "bright even studio lighting, no shadows, no person, centered composition, " +
+                "high detail, preserve original colors and patterns"
+
+            // SD v1.5 img2img expects "image" as a JSON array of byte ints (0-255)
+            val imgBytes = android.util.Base64.decode(base64Image, android.util.Base64.NO_WRAP)
+            val imageArray = JSONArray()
+            for (b in imgBytes) imageArray.put(b.toInt() and 0xFF)
+
+            val body = JSONObject().apply {
+                put("prompt", prompt)
+                put("image", imageArray)
+                put("strength", 0.65)   // 0=keep original, 1=fully regenerate; 0.65 = clean BG, keep garment
+                put("num_steps", 20)
+                put("guidance", 7.5)
+            }.toString()
+
+            val bytes = callCloudflareAi("@cf/runwayml/stable-diffusion-v1-5-img2img", body) ?: return null
+            saveImageBytes(bytes, "product_cf_img2img", "cloudflare-sd15-img2img")
+        } catch (e: Exception) {
+            Log.e("ProductShot", "CF img2img failed: ${e.message}"); null
+        }
+    }
+
+    /** Builds the standardised "product shot" prompt used by Pollinations + CF FLUX. */
+    private fun buildShotPrompt(category: String, color: String?, tags: List<String>): String {
+        val colorPart = if (!color.isNullOrBlank()) "${color.trim()} " else ""
+        val tagPart   = tags
+            .filter { it.length > 2 && it.lowercase() !in setOf("any", "everyday") }
+            .take(3)
+            .joinToString(", ")
+            .let { if (it.isNotBlank()) ", $it" else "" }
+        return "Professional ecommerce product photograph of a $colorPart$category$tagPart, " +
+            "centered flat-lay composition on a soft cream studio background hex F5F0E8, " +
+            "bright even studio lighting, no shadows, no person, no text, no watermark, " +
+            "high detail, 4k, clean isolated subject"
+    }
+
+    /**
+     * Calls a Cloudflare Workers AI model and returns the PNG bytes.
+     * Handles both response shapes: raw image/png body, OR JSON with base64 in result.image.
+     */
+    private fun callCloudflareAi(model: String, jsonBody: String): ByteArray? {
+        val token     = BuildConfig.CF_API_TOKEN
+        val accountId = BuildConfig.CF_ACCOUNT_ID
+        if (token.isBlank() || accountId.isBlank()) {
+            Log.e("ProductShot", "CF credentials missing in BuildConfig"); return null
+        }
+        val url = "https://api.cloudflare.com/client/v4/accounts/$accountId/ai/run/$model"
+        val req = Request.Builder()
+            .url(url)
+            .post(jsonBody.toRequestBody("application/json".toMediaType()))
+            .header("Authorization", "Bearer $token")
+            .build()
+
+        val resp = client.newCall(req).execute()
+        val code = resp.code
+        val contentType = resp.header("Content-Type") ?: ""
+        if (!resp.isSuccessful) {
+            val errBody = resp.body?.string()?.take(400)
+            resp.close()
+            Log.w("ProductShot", "CF $model HTTP $code: $errBody"); return null
+        }
+
+        return if (contentType.startsWith("image/")) {
+            // Raw PNG bytes
+            val bytes = resp.body?.bytes(); resp.close()
+            Log.d("ProductShot", "CF $model returned raw image, ${bytes?.size ?: 0} bytes")
+            bytes
+        } else {
+            // JSON wrapper {"result":{"image":"<base64>"},"success":true}
+            val bodyStr = resp.body?.string(); resp.close()
+            val b64 = JSONObject(bodyStr ?: "{}").optJSONObject("result")?.optString("image")
+            if (b64.isNullOrBlank()) {
+                Log.w("ProductShot", "CF $model returned JSON without image data"); null
+            } else {
+                Log.d("ProductShot", "CF $model returned base64 image (${b64.length} chars)")
+                android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+            }
+        }
+    }
+
+    /**
+     * Calls Gemini's image-generation model with a prompt + input image, returns the
+     * generated PNG bytes (decoded from inline base64 in the response).
+     */
+    private fun callGeminiForImage(prompt: String, base64Image: String): ByteArray? {
+        val imageModel = "gemini-2.5-flash-image"
+        val url        = "$baseUrl/$imageModel:generateContent?key=$apiKey"
+        try {
+            // Build request body: image part + text prompt + responseModalities=IMAGE
+            val parts = JSONArray()
+                .put(JSONObject().apply {
+                    put("inline_data", JSONObject().apply {
+                        put("mime_type", "image/jpeg")
+                        put("data", base64Image)
+                    })
+                })
+                .put(JSONObject().apply { put("text", prompt) })
+
+            val bodyJson = JSONObject().apply {
+                put("contents", JSONArray().put(JSONObject().apply { put("parts", parts) }))
+                put("generationConfig", JSONObject().apply {
+                    put("responseModalities", JSONArray().put("IMAGE"))
+                })
+            }.toString()
+
+            val request = Request.Builder()
+                .url(url)
+                .post(bodyJson.toRequestBody("application/json".toMediaType()))
+                .build()
+
+            val response = client.newCall(request).execute()
+            val code     = response.code
+            val bodyStr  = response.body?.string()
+            response.close()
+
+            if (!response.isSuccessful || bodyStr.isNullOrBlank()) {
+                Log.w("GeminiAI", "$imageModel HTTP $code body=${bodyStr?.take(200)}")
+                return null
+            }
+
+            // Walk the response: candidates[0].content.parts[*].inlineData.data
+            val parts2 = JSONObject(bodyStr)
+                .optJSONArray("candidates")
+                ?.optJSONObject(0)
+                ?.optJSONObject("content")
+                ?.optJSONArray("parts")
+                ?: return null
+
+            for (i in 0 until parts2.length()) {
+                val part = parts2.optJSONObject(i) ?: continue
+                val inline = part.optJSONObject("inlineData") ?: part.optJSONObject("inline_data")
+                val data   = inline?.optString("data")
+                if (!data.isNullOrBlank()) {
+                    Log.d("GeminiAI", "$imageModel returned image (${data.length} b64 chars)")
+                    return android.util.Base64.decode(data, android.util.Base64.NO_WRAP)
+                }
+            }
+            Log.w("GeminiAI", "$imageModel response had no inline image data")
+            return null
+        } catch (e: Exception) {
+            Log.e("GeminiAI", "$imageModel call failed: ${e.message}")
+            return null
+        }
+    }
+
+    /**
      * Decodes base64 → Bitmap, center-crops to square, scales to 512×512, saves to file.
      */
     private fun cropBase64ToThumbnail(base64Image: String, suffix: String): String? {
@@ -356,29 +587,36 @@ class GeminiClothingAnalyzer @Inject constructor(
     }
 
     private fun callGemini(body: String): String? {
+        // Single attempt per model — no retry.  Retrying a 429 just burns more
+        // of the per-minute rate budget without changing the outcome; better to
+        // immediately roll to the next model (which has its own separate quota).
         for (model in models) {
+            val url = "$baseUrl/$model:generateContent?key=$apiKey"
             try {
-                val base = if (model.startsWith("gemini-1.5")) baseUrlV1b else baseUrl
-                val url = "$base/$model:generateContent?key=$apiKey"
                 val request = Request.Builder()
                     .url(url)
                     .post(body.toRequestBody("application/json".toMediaType()))
                     .build()
 
-                client.newCall(request).execute().use { response ->
-                    val responseBody = response.body?.string() ?: return@use
-                    if (response.isSuccessful) {
+                val response = client.newCall(request).execute()
+                val code     = response.code
+                val bodyStr  = response.body?.string()
+                response.close()
+
+                if (response.isSuccessful && !bodyStr.isNullOrBlank()) {
+                    val text = JSONObject(bodyStr)
+                        .optJSONArray("candidates")
+                        ?.optJSONObject(0)
+                        ?.optJSONObject("content")
+                        ?.optJSONArray("parts")
+                        ?.optJSONObject(0)
+                        ?.optString("text")
+                    if (!text.isNullOrBlank()) {
                         Log.d("GeminiAI", "Success with $model")
-                        val text = JSONObject(responseBody)
-                            .optJSONArray("candidates")
-                            ?.optJSONObject(0)
-                            ?.optJSONObject("content")
-                            ?.optJSONArray("parts")
-                            ?.optJSONObject(0)
-                            ?.optString("text")
-                        if (text != null) return text
+                        return text
                     }
-                    Log.w("GeminiAI", "$model HTTP ${response.code} — trying next")
+                } else {
+                    Log.w("GeminiAI", "$model HTTP $code — trying next model")
                 }
             } catch (e: Exception) {
                 Log.e("GeminiAI", "$model failed: ${e.message}")
@@ -389,6 +627,48 @@ class GeminiClothingAnalyzer @Inject constructor(
     }
 
     // ── Parsing ──────────────────────────────────────────────────────────────
+
+    /**
+     * Canonical clothing type names.  Multi-word variants are listed first (most specific)
+     * so "Anarkali Suit" matches before a plain "Kurta" would.
+     */
+    private val knownTypes = listOf(
+        // Multi-word / specific variants first
+        "Palazzo Set", "Co-ord Set", "Anarkali Suit", "Sharara Set",
+        "Maxi Dress", "Midi Dress", "Mini Dress", "Shirt Dress", "Wrap Dress",
+        "Bodycon Dress", "Slip Dress", "Sundress", "Fit & Flare", "A-Line Dress",
+        "Slim Fit Jeans", "Straight Jeans", "Skinny Jeans", "Mom Jeans",
+        "Wide-Leg Jeans", "Ripped Jeans", "Bootcut Jeans",
+        "Formal Shirt", "Oxford Shirt", "Linen Shirt", "Flannel Shirt",
+        "Oversized Shirt", "Crop Top", "Tank Top", "Polo Shirt", "Hawaiian Shirt",
+        "Graphic Tee", "Plain T-Shirt", "Oversized Tee", "Crop Tee", "Striped Tee",
+        "Polo Tee", "Muscle Tee", "Henley",
+        "Trench Coat", "Puffer Jacket", "Denim Jacket", "Leather Jacket",
+        "Bomber Jacket", "Windbreaker", "Nehru Jacket", "Bandhgala", "Shacket",
+        "Crew Neck Sweater", "V-Neck Sweater", "Turtleneck", "Cable Knit",
+        "Cardigan", "Sweatshirt", "Hoodie", "Shrug",
+        "Straight Kurta", "A-Line Kurta", "Anarkali Kurta", "Pathani Kurta",
+        "Churidar Kurta", "Indo-Western Kurta", "Kurti", "Sherwani",
+        "Bridal Lehenga", "Party Lehenga", "A-Line Lehenga", "Mermaid Lehenga",
+        "Chaniya Choli", "Ghagra",
+        "Silk Saree", "Cotton Saree", "Georgette Saree", "Chiffon Saree",
+        "Banarasi Saree", "Printed Saree", "Pre-Draped Saree",
+        "Oxford Shoes", "Chelsea Boots", "High Heels", "Block Heels",
+        "Platform Shoes", "Slip-On Shoes", "Sports Shoes", "Loafers", "Sneakers",
+        "Flat Sandals", "Heeled Sandals", "Gladiator Sandals",
+        "Kolhapuri", "Juttis", "Slides",
+        "Baseball Cap", "Bucket Hat", "Beanie", "Straw Hat", "Fedora", "Turban",
+        // Base labels last
+        "Dress", "Kurta", "Lehenga", "Saree", "Shirt", "T-Shirt", "Jeans",
+        "Pants", "Shorts", "Jacket", "Blazer", "Coat", "Sweater",
+        "Shoes", "Sandals", "Hat", "Choli"
+    )
+
+    /** Strip verbose Gemini descriptions down to a canonical clothing type. */
+    private fun normalizeGeminiType(rawType: String): String {
+        val lower = rawType.lowercase()
+        return knownTypes.firstOrNull { it.lowercase() in lower } ?: rawType.trim()
+    }
 
     private fun parseClothingAnalysis(json: String): ImageAnalysisResult {
         return try {
@@ -417,7 +697,7 @@ class GeminiClothingAnalyzer @Inject constructor(
 
             ImageAnalysisResult(
                 isClothing  = true,
-                category    = obj.optString("type", "Clothing Item").trim(),
+                category    = normalizeGeminiType(obj.optString("type", "Clothing Item")),
                 tags        = enrichedTags,
                 occasions   = occasions,
                 seasons     = seasons,

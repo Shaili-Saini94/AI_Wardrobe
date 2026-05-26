@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.ai.wardrobe.data.datastore.StyleProfileDataStore
 import com.ai.wardrobe.ui.calendar.CalendarScreen
 import com.ai.wardrobe.ui.calendar.CalendarViewModel
 import com.ai.wardrobe.ui.dashboard.DashboardScreen
@@ -23,6 +24,8 @@ import com.ai.wardrobe.ui.styling.StylingViewModel
 import com.ai.wardrobe.ui.theme.*
 import com.ai.wardrobe.ui.wardrobe.WardrobeGalleryScreen
 import com.ai.wardrobe.ui.wardrobe.WardrobeViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.ai.wardrobe.ui.main.MainViewModel
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -38,13 +41,23 @@ sealed class NavKey {
 
 @Composable
 fun MainScreen() {
+    val mainViewModel: MainViewModel           = hiltViewModel()
     val dashboardViewModel: DashboardViewModel = hiltViewModel()
     val wardrobeViewModel: WardrobeViewModel   = hiltViewModel()
     val stylingViewModel: StylingViewModel     = hiltViewModel()
     val calendarViewModel: CalendarViewModel   = hiltViewModel()
     val insightsViewModel: InsightsViewModel   = hiltViewModel()
 
-    var currentKey by remember { mutableStateOf<NavKey>(NavKey.Onboarding) }
+    val onboardingComplete by mainViewModel.onboardingComplete.collectAsStateWithLifecycle(initialValue = null)
+
+    // null = still loading; show nothing until we know
+    if (onboardingComplete == null) return
+
+    var currentKey by remember {
+        mutableStateOf<NavKey>(
+            if (onboardingComplete == true) NavKey.Dashboard else NavKey.Onboarding
+        )
+    }
 
     Scaffold(
         bottomBar = {

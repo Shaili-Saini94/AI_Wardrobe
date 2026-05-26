@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -21,10 +22,19 @@ class StyleProfileDataStore @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     companion object {
-        val KEY_STYLES    = stringSetPreferencesKey("preferred_styles")
-        val KEY_OCCASIONS = stringSetPreferencesKey("favorite_occasions")
-        val KEY_PALETTE   = stringPreferencesKey("color_palette")
-        val KEY_GENDER    = stringPreferencesKey("gender")
+        val KEY_STYLES         = stringSetPreferencesKey("preferred_styles")
+        val KEY_OCCASIONS      = stringSetPreferencesKey("favorite_occasions")
+        val KEY_PALETTE        = stringPreferencesKey("color_palette")
+        val KEY_GENDER         = stringPreferencesKey("gender")
+        val KEY_ONBOARDING_DONE = booleanPreferencesKey("onboarding_complete")
+    }
+
+    val onboardingComplete: Flow<Boolean> = context.styleDataStore.data.map { prefs ->
+        prefs[KEY_ONBOARDING_DONE] ?: false
+    }
+
+    suspend fun setOnboardingComplete() {
+        context.styleDataStore.edit { it[KEY_ONBOARDING_DONE] = true }
     }
 
     val profile: Flow<StyleProfile> = context.styleDataStore.data.map { prefs ->

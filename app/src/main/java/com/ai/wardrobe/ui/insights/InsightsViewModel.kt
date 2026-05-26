@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.ai.wardrobe.ai.CapsuleItem
 import com.ai.wardrobe.ai.ColorPalette
 import com.ai.wardrobe.ai.NaturalLanguageSearch
+import com.ai.wardrobe.ai.SimilarPair
 import com.ai.wardrobe.ai.StyleDna
 import com.ai.wardrobe.ai.WardrobeGap
 import com.ai.wardrobe.ai.WardrobeIntelligence
@@ -21,6 +22,7 @@ data class InsightsUiState(
     val gaps: List<WardrobeGap> = emptyList(),
     val palette: ColorPalette? = null,
     val styleDna: StyleDna? = null,
+    val similars: List<SimilarPair> = emptyList(),
     val isLoading: Boolean = false
 )
 
@@ -57,6 +59,7 @@ class InsightsViewModel @Inject constructor(
                         gaps      = intelligence.detectGaps(items),
                         palette   = intelligence.buildColorPalette(items),
                         styleDna  = intelligence.buildStyleDna(items),
+                        similars  = intelligence.detectSimilars(items),
                         isLoading = false
                     )
                 }

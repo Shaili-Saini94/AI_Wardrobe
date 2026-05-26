@@ -1,0 +1,21 @@
+# Project-wide Gradle settings.
+# Copy this file to gradle.properties and fill in your API keys.
+# DO NOT commit gradle.properties — it is gitignored to keep secrets out of source control.
+
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+kotlin.code.style=official
+android.disallowKotlinSourceSets=false
+android.builtInKotlin=false
+android.newDsl=false
+android.uniquePackageNames=false
+
+# ── API KEYS — fill these in ────────────────────────────────────────────────
+
+# Gemini API (Google AI Studio) — for clothing analysis
+# Get one at: https://aistudio.google.com/apikey
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
+
+# Cloudflare Workers AI — for product shot generation (FLUX + SD img2img)
+# Get token at: https://dash.cloudflare.com → AI → Workers AI → REST API
+CF_API_TOKEN=YOUR_CLOUDFLARE_WORKERS_AI_TOKEN_HERE
+CF_ACCOUNT_ID=YOUR_CLOUDFLARE_ACCOUNT_ID_HERE
